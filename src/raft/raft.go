@@ -165,6 +165,7 @@ func (rf *Raft) readPersist(data []byte) {
                 rf.votedFor = votedFor
                 rf.logs = logs
                 rf.lastLogIndex = len(rf.logs) - 1
+		rf.lastLogTerm = -1
                 if rf.lastLogIndex >= 0 {
                         rf.lastLogTerm = rf.logs[rf.lastLogIndex].Term
                 }
@@ -266,12 +267,12 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if (rf.votedFor == -1) || (rf.votedFor == args.CandidateId) {
                 if len(rf.logs) + rf.startIndex == 0 {
                         granted = true
-                } else if (len(rf.logs) == 0 && rf.lastIncludedTerm < args.LastLogTerm) || (rf.logs[len(rf.logs) - 1].Term < args.LastLogTerm) {
+                } else if rf.lastLogTerm < args.LastLogTerm {
                         granted = true
-                } else if rf.logs[len(rf.logs) - 1].Term == args.LastLogTerm && len(rf.logs) <= args.LastLogIndex + 1 {
+                } else if rf.lastLogTerm == args.LastLogTerm && len(rf.logs) <= args.LastLogIndex + 1 {
                         granted = true
                 } else {
-			Debug(dVote, "Term %d, server %d, last log term %d, args last log term %d\n", rf.currentTerm, rf.me, rf.logs[len(rf.logs) - 1].Term, args.LastLogTerm)
+			Debug(dVote, "Term %d, server %d, last log term %d, args last log term %d\n", rf.currentTerm, rf.me, rf.lastLogTerm, args.LastLogTerm)
                         granted = false
                 }
         }
@@ -569,12 +570,7 @@ func (rf *Raft) requestVoteGoroutine(server int) {
                 return
         }
 
-	last_log_index := len(rf.logs) - 1
-	last_log_term := -1
-	if last_log_index >= 0 {
-		last_log_term = rf.logs[last_log_index].Term
-	}
-        args := RequestVoteArgs{rf.currentTerm, rf.me, last_log_index, last_log_term}
+        args := RequestVoteArgs{rf.currentTerm, rf.me, rf.lastLogIndex, rf.lastLogTerm}
         reply := RequestVoteReply{}
         rf.mu.Unlock()
 	Debug(dVote, "Term %d, server %d send a vote request to server %d\n", args.Term, rf.me, server)
@@ -762,6 +758,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
         rf.isCandidate = false
         rf.matchMaps = make(map[int]int)
         rf.lastLogIndex = -1
+	rf.lastLogTerm = -1
         rf.applyChan = applyCh
         rf.applyCond = sync.NewCond(&rf.mu)
         for i := 0; i < len(rf.peers); i++ {
