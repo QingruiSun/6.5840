@@ -74,6 +74,7 @@ type Raft struct {
         votedFor int
         lastLogIndex int
         lastLogTerm int
+	logNumber int
         logs []Log
         matchMaps map[int]int
         applyCond *sync.Cond
@@ -169,6 +170,7 @@ func (rf *Raft) readPersist(data []byte) {
                 if rf.lastLogIndex >= 0 {
                         rf.lastLogTerm = rf.logs[rf.lastLogIndex].Term
                 }
+		rf.logNumber = len(rf.logs)
         }
 }
 
@@ -269,7 +271,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
                         granted = true
                 } else if rf.lastLogTerm < args.LastLogTerm {
                         granted = true
-                } else if rf.lastLogTerm == args.LastLogTerm && len(rf.logs) <= args.LastLogIndex + 1 {
+                } else if rf.lastLogTerm == args.LastLogTerm && rf.logNumber <= args.LastLogIndex + 1 {
                         granted = true
                 } else {
 			Debug(dVote, "Term %d, server %d, last log term %d, args last log term %d\n", rf.currentTerm, rf.me, rf.lastLogTerm, args.LastLogTerm)
@@ -361,6 +363,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
         } else {
                 rf.lastLogTerm = rf.logs[rf.lastLogIndex].Term
         }
+	rf.logNumber = rf.logNumber + 1
 
 	Debug(dStart, "Term %d, server %d start %v in index %d\n", rf.currentTerm, rf.me, command, rf.lastLogIndex)
         index = rf.lastLogIndex
@@ -458,8 +461,9 @@ func (rf *Raft) AppendEntriesHandler(args *AppendEntriesArgs, reply *AppendEntri
         }
 	rf.persist()
 
-        if len(rf.logs) > 0 {
-                rf.lastLogIndex = len(rf.logs) - 1
+	rf.logNumber = len(rf.logs)
+        if rf.logNumber > 0 {
+                rf.lastLogIndex = rf.logNumber - 1
                 rf.lastLogTerm = rf.logs[rf.lastLogIndex].Term
         }
 
@@ -517,8 +521,8 @@ func (rf *Raft) sendAppendEntriesForOneServer(server int) {
                 }
                 if reply.Success {
                         rf.nextIndex[server] = rf.nextIndex[server] + len(args.Entries)
-			if rf.nextIndex[server] > len(rf.logs) {
-				rf.nextIndex[server] = len(rf.logs)
+			if rf.nextIndex[server] > rf.logNumber {
+				rf.nextIndex[server] = rf.logNumber
 			}
 			Debug(dAppend, "Term %d, leader %d receive success reply from server %d", rf.currentTerm, rf.me, server)
                         prev_match_index := rf.matchIndex[server]
@@ -759,6 +763,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
         rf.matchMaps = make(map[int]int)
         rf.lastLogIndex = -1
 	rf.lastLogTerm = -1
+	rf.logNumber = 0
         rf.applyChan = applyCh
         rf.applyCond = sync.NewCond(&rf.mu)
         for i := 0; i < len(rf.peers); i++ {
