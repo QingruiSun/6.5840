@@ -18,13 +18,14 @@ package raft
 //
 
 import (
-	//	"bytes"
+	"bytes"
 	"math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
+	"log"
 
-	//	"6.5840/labgob"
+	"6.5840/labgob"
 	"6.5840/labrpc"
 )
 
@@ -120,6 +121,13 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// raftstate := w.Bytes()
 	// rf.persister.Save(raftstate, nil)
+	 w := new(bytes.Buffer)
+        e := labgob.NewEncoder(w)
+        e.Encode(rf.currentTerm)
+        e.Encode(rf.votedFor)
+        e.Encode(rf.logs)
+        data := w.Bytes()
+        rf.persister.Save(data, nil)
 }
 
 
@@ -141,6 +149,22 @@ func (rf *Raft) readPersist(data []byte) {
 	//   rf.xxx = xxx
 	//   rf.yyy = yyy
 	// }
+	r := bytes.NewBuffer(data)
+        d := labgob.NewDecoder(r)
+        var term int
+        var votedFor int
+        var logs []Log
+        if d.Decode(&term) != nil || d.Decode(&votedFor) != nil || d.Decode(&logs) != nil {
+                log.Printf("Error when Decode persist state\n")
+        } else {
+                rf.currentTerm = term
+                rf.votedFor = votedFor
+                rf.logs = logs
+                rf.lastLogIndex = len(rf.logs) - 1
+                if rf.lastLogIndex >= 0 {
+                        rf.lastLogTerm = rf.logs[rf.lastLogTerm].Term
+                }
+        }
 }
 
 
@@ -169,6 +193,7 @@ func (rf *Raft) applyGoroutine() {
                         }
                         rf.applyCond.L.Unlock()
                         for _, msg := range apply_msgs {
+				Debug(dApply, "Term %d, server %d apply %v in index %d\n", rf.currentTerm, rf.me, msg.Command, msg.CommandIndex)
                                 rf.applyChan <- msg
                         }
                 } else {
@@ -202,12 +227,14 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
         defer rf.mu.Unlock()
 
+	Debug(dVote, "Term %d, server %d receive vote request from server %d, candidate term is %d, lastLogIndex is %d, lastLogTerm %d\n", rf.currentTerm, rf.me, args.CandidateId, args.Term, args.LastLogIndex, args.LastLogTerm)
         if args.Term < rf.currentTerm {
                 reply.Term = rf.currentTerm
                 reply.VoteGranted = false
                 return
         }
 
+	granted := false
         if args.Term > rf.currentTerm {
                 rf.currentTerm = args.Term
                 rf.votedFor = -1
@@ -216,8 +243,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
                 rf.isFollower = true
         }
 
-        granted := false
-        if (rf.votedFor == -1) || (rf.votedFor == args.CandidateId) {
+	if (rf.votedFor == -1) || (rf.votedFor == args.CandidateId) {
                 if len(rf.logs) == 0 {
                         granted = true
                 } else if rf.logs[len(rf.logs) - 1].Term < args.LastLogTerm {
@@ -225,19 +251,25 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
                 } else if rf.logs[len(rf.logs) - 1].Term == args.LastLogTerm && len(rf.logs) <= args.LastLogIndex + 1 {
                         granted = true
                 } else {
+			Debug(dVote, "Term %d, server %d, last log term %d, args last log term %d\n", rf.currentTerm, rf.me, rf.logs[len(rf.logs) - 1].Term, args.LastLogTerm)
                         granted = false
                 }
         }
+
         if granted {
                 reply.Term = rf.currentTerm
                 reply.VoteGranted = true
                 rf.votedFor = args.CandidateId
+		rf.persist()
                 rf.rest_start_time = time.Now()
                 reelection_time := time.Duration(rf.min_reelection_time) * time.Millisecond + time.Duration(rand.Int() % 300) * time.Millisecond
                 rf.election_start_time = rf.rest_start_time.Add(reelection_time)
+		Debug(dVote, "Term %d, server %d granted vote to server %d\n", rf.currentTerm, rf.me, args.CandidateId)
                 return
         }
 
+	Debug(dVote, "Term %d, server %d refuse granted vote to server %d\n", rf.currentTerm, rf.me, args.CandidateId)
+	rf.persist()
         reply.Term = rf.currentTerm
         reply.VoteGranted = false
 }
@@ -309,10 +341,12 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
                 rf.lastLogTerm = rf.logs[rf.lastLogIndex].Term
         }
 
+	Debug(dStart, "Term %d, server %d start %v in index %d\n", rf.currentTerm, rf.me, command, rf.lastLogIndex)
         index = rf.lastLogIndex
         term = rf.currentTerm
         isLeader = true
 
+	rf.persist()
         return index + 1, term, isLeader
 }
 
@@ -352,9 +386,11 @@ type AppendEntriesReply struct {
 func (rf *Raft) AppendEntriesHandler(args *AppendEntriesArgs, reply *AppendEntriesReply) {
         rf.mu.Lock()
         defer rf.mu.Unlock()
+	Debug(dAppend, "Term %d, server %d recieve append entries from leader %d\n", rf.currentTerm, rf.me, args.LeaderId)
         if (args.Term < rf.currentTerm) {
                 reply.Term  = rf.currentTerm
                 reply.Success = false
+		Debug(dAppend, "Term %d, server %d refuse append entries from leader %d because small term %d\n", rf.currentTerm, rf.me, args.LeaderId, args.Term)
                 return
         }
 
@@ -363,6 +399,7 @@ func (rf *Raft) AppendEntriesHandler(args *AppendEntriesArgs, reply *AppendEntri
                 rf.isLeader = false
                 rf.isCandidate = false
                 rf.isFollower = true
+		rf.persist()
                 rf.rest_start_time = time.Now()
                 reelection_time := time.Duration(rf.min_reelection_time) * time.Millisecond + time.Duration((rand.Int() % 300)) * time.Millisecond
                 rf.election_start_time = rf.rest_start_time.Add(reelection_time)
@@ -371,7 +408,13 @@ func (rf *Raft) AppendEntriesHandler(args *AppendEntriesArgs, reply *AppendEntri
         if (len(rf.logs) <= args.PrevLogIndex) || (args.PrevLogIndex >= 0 && rf.logs[args.PrevLogIndex].Term != args.PrevLogTerm) {
                 reply.Term = rf.currentTerm
                 reply.Success = false
-                return
+		Debug(dAppend, "Term %d, server %d refuse append entries from leader %d because unmatch log and term\n", rf.currentTerm, rf.me, args.LeaderId)
+                if len(rf.logs) <= args.PrevLogIndex {
+			Debug(dAppend, "Term %d, server %d logs len %d is too small for prev log index %d\n", rf.currentTerm, rf.me, len(rf.logs), args.PrevLogIndex)
+		} else {
+			Debug(dAppend, "Term %d, server %d recieve prev log index is %d, prev log term %d, according log term is %d\n", rf.currentTerm, rf.me, args.PrevLogIndex, args.PrevLogTerm, rf.logs[args.PrevLogIndex].Term)
+		}
+		return
         }
 
         unmatch_index := -1
@@ -383,6 +426,8 @@ func (rf *Raft) AppendEntriesHandler(args *AppendEntriesArgs, reply *AppendEntri
                         break
                 }
         }
+
+	Debug(dAppend, "Term %d, server %d unmatch index %d", rf.currentTerm, rf.me, unmatch_index)
         if unmatch_index != -1 {
                 rf.logs = append(rf.logs[:args.PrevLogIndex + 1 + unmatch_index], args.Entries[unmatch_index:]...)
         } else {
@@ -390,6 +435,7 @@ func (rf *Raft) AppendEntriesHandler(args *AppendEntriesArgs, reply *AppendEntri
                         rf.logs = append(rf.logs, args.Entries[entry_index:]...)
                 }
         }
+	rf.persist()
 
         if len(rf.logs) > 0 {
                 rf.lastLogIndex = len(rf.logs) - 1
@@ -417,6 +463,8 @@ func (rf *Raft) sendAppendEntriesForOneServer(server int) {
                 rf.mu.Unlock()
                 return
         }
+
+	Debug(dAppend, "Term %d, leader %d, last log index %d, next index %d for server %d\n", rf.currentTerm, rf.me, rf.lastLogIndex, rf.nextIndex[server], server)
         prev_log_index := rf.nextIndex[server] - 1
         if rf.nextIndex[server] > rf.lastLogIndex {
                 prev_log_index = rf.lastLogIndex
@@ -429,6 +477,7 @@ func (rf *Raft) sendAppendEntriesForOneServer(server int) {
         args := AppendEntriesArgs{rf.currentTerm, rf.me, prev_log_index, prev_log_term, rf.logs[prev_log_index + 1:], rf.commitIndex}
         reply := AppendEntriesReply{}
         rf.mu.Unlock()
+	Debug(dAppend, "Term %d, leader %d send a append entries to server %d, prev log index is %d, prev log term is %d, commmit index is %d\n", args.Term, rf.me, server, args.PrevLogIndex, args.PrevLogTerm, args.LeaderCommit)
         rpc_return := rf.sendAppendEntries(server, &args, &reply)
         rf.mu.Lock()
         if rpc_return {
@@ -441,18 +490,25 @@ func (rf *Raft) sendAppendEntriesForOneServer(server int) {
                         rf.isCandidate = false
                         rf.isFollower = true
                         rf.currentTerm = reply.Term
+			rf.persist()
                         rf.mu.Unlock()
                         return
                 }
                 if reply.Success {
                         rf.nextIndex[server] = rf.nextIndex[server] + len(args.Entries)
+			if rf.nextIndex[server] > len(rf.logs) {
+				rf.nextIndex[server] = len(rf.logs)
+			}
+			Debug(dAppend, "Term %d, leader %d receive success reply from server %d", rf.currentTerm, rf.me, server)
                         prev_match_index := rf.matchIndex[server]
                         rf.matchIndex[server] = args.PrevLogIndex + len(args.Entries)
                         for i := prev_match_index + 1; i <= rf.matchIndex[server]; i++ {
                                 rf.matchMaps[i]++
                                 if (rf.matchMaps[i] >= (len(rf.peers) / 2 + 1)) && (i > rf.commitIndex) {
-                                        rf.commitIndex = i
-                                        rf.applyCond.Signal()
+					if rf.logs[i].Term == rf.currentTerm {
+						rf.commitIndex = i
+                                                rf.applyCond.Signal()
+					}
                                 }
                         }
                         rf.mu.Unlock()
@@ -461,6 +517,7 @@ func (rf *Raft) sendAppendEntriesForOneServer(server int) {
 
 		if rf.nextIndex[server] > 0 {
                         rf.nextIndex[server] = rf.nextIndex[server] - 1
+			Debug(dAppend, "Term %d, leader %d update server %d next index to %d", rf.currentTerm, rf.me, server, rf.nextIndex[server])
                 }
         }
         rf.mu.Unlock()
@@ -491,9 +548,16 @@ func (rf *Raft) requestVoteGoroutine(server int) {
                 rf.mu.Unlock()
                 return
         }
-        args := RequestVoteArgs{rf.currentTerm, rf.me, rf.lastLogIndex, rf.lastLogTerm}
+
+	last_log_index := len(rf.logs) - 1
+	last_log_term := -1
+	if last_log_index >= 0 {
+		last_log_term = rf.logs[last_log_index].Term
+	}
+        args := RequestVoteArgs{rf.currentTerm, rf.me, last_log_index, last_log_term}
         reply := RequestVoteReply{}
         rf.mu.Unlock()
+	Debug(dVote, "Term %d, server %d send a vote request to server %d\n", args.Term, rf.me, server)
         rpc_return := rf.sendRequestVote(server, &args, &reply)
         if !rpc_return {
                 return
@@ -504,6 +568,7 @@ func (rf *Raft) requestVoteGoroutine(server int) {
                 rf.isCandidate = false
                 rf.isFollower = true
                 rf.currentTerm = reply.Term
+		rf.persist()
                 return
         }
 
@@ -543,7 +608,9 @@ func (rf *Raft) election_poller() {
                                 rf.isCandidate = true
                                 rf.currentTerm = rf.currentTerm + 1
                                 rf.votedFor = rf.me
+				rf.persist()
                                 rf.collect_vote = 1
+				Debug(dVote, "Term %d, server %d convert to candidate, start an election\n", rf.currentTerm, rf.me)
                                 for index, _ := range rf.peers {
                                         if index == rf.me {
                                                 continue
@@ -565,6 +632,8 @@ func (rf *Raft) election_poller() {
                                 rf.mu.Lock()
                                 rf.collect_vote = 1
                                 rf.currentTerm = rf.currentTerm + 1
+				rf.persist()
+				Debug(dVote, "Term %d, server %d election timeout, start an election\n", rf.currentTerm, rf.me)
                                 for index, _ := range rf.peers {
                                         if index == rf.me {
                                                 continue
@@ -634,7 +703,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
         }
 
         rf.readPersist(persister.ReadRaftState())
-
+	Debug(dBoot, "Term %d, server %d start boot with logs len %d\n", rf.currentTerm, rf.me, len(rf.logs))
         go rf.election_poller()
         go rf.sendAppendGoroutine()
         go rf.applyGoroutine()
