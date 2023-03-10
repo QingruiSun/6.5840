@@ -91,6 +91,10 @@ type Raft struct {
         min_reelection_time int
         check_interval int
         heartbeat_time int
+
+	startIndex int
+	lastIncludedIndex int
+	lastIncludedTerm int
 }
 
 // return currentTerm and whether this server
@@ -162,7 +166,7 @@ func (rf *Raft) readPersist(data []byte) {
                 rf.logs = logs
                 rf.lastLogIndex = len(rf.logs) - 1
                 if rf.lastLogIndex >= 0 {
-                        rf.lastLogTerm = rf.logs[rf.lastLogTerm].Term
+                        rf.lastLogTerm = rf.logs[rf.lastLogIndex].Term
                 }
         }
 }
@@ -174,6 +178,16 @@ func (rf *Raft) readPersist(data []byte) {
 // that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (2D).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	index-- // Our index start from 0
+	rf.snapshot = snapshot
+	rf.lastIncludedIndex = index
+	rf.lastIncludedTerm = -1
+	if rf.lastIncludedIndex >= 0 {
+		rf.lastIncludedTerm = rf.logs[rf.lastIncludedIndex - rf.startIndex].Term
+	}
+	rf.logs = rf.logs[rf.lastIncludedIndex + 1 - rf.startIndex]
 
 }
 
@@ -184,6 +198,12 @@ func (rf *Raft) applyGoroutine() {
                 }
                 rf.applyCond.L.Lock()
                 rf.applyCond.Wait()
+		if rf.lastApplied < rf.lastIncludedIndex {
+			msg := ApplyMsg{false, nil, -1, true, rf.snapshot, rf.lastIncludedTerm, rf.lastIncludedIndex + 1}
+			rf.applyCond.L.Unlock()
+			rf.applyChan <- msg
+			rf.applyCond.L.Lock()
+		}
                 if rf.lastApplied < rf.commitIndex{
                         var apply_msgs []ApplyMsg
                         for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
@@ -244,9 +264,9 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
         }
 
 	if (rf.votedFor == -1) || (rf.votedFor == args.CandidateId) {
-                if len(rf.logs) == 0 {
+                if len(rf.logs) + rf.startIndex == 0 {
                         granted = true
-                } else if rf.logs[len(rf.logs) - 1].Term < args.LastLogTerm {
+                } else if (len(rf.logs) == 0 && rf.lastIncludedTerm < args.LastLogTerm) || (rf.logs[len(rf.logs) - 1].Term < args.LastLogTerm) {
                         granted = true
                 } else if rf.logs[len(rf.logs) - 1].Term == args.LastLogTerm && len(rf.logs) <= args.LastLogIndex + 1 {
                         granted = true
@@ -651,6 +671,53 @@ func (rf *Raft) election_poller() {
         }
 }
 
+type InstallSnapshotArgs struct {
+	Term int
+	LeaderId int
+	LastIncludedIndex int
+	LastIncludedTerm int
+	Data []byte
+}
+
+type InstallSnapshotReply struct {
+	Term int
+}
+
+func (rf *Raft) InstallSnapshotHandler(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
+	rf.mu.Lock()
+	if args.Term < rf.currentTerm {
+		reply.Term = rf.currentTerm
+		return
+	}
+
+	if args.Term > rf.currentTerm {
+		rf.currentTerm = args.Term
+		rf.isLeader = false
+		rf.isCandidate = false
+		rf.rest_start_time = time.Now()
+                reelection_time := time.Duration(rf.min_reelection_time) * time.Millisecond + time.Duration((rand.Int() % 300)) * time.Millisecond
+                rf.election_start_time = rf.rest_start_time.Add(reelection_time)
+	}
+
+	reply.Term = rf.currentTerm
+
+	if args.lastIncludedIndex >= rf.startIndex + len(rf.logs) {
+		rf.logs = nil
+	} else {
+		if rf.logs[args.lastIncludedIndex - rf.startIndex].Term == args.lastIncludedTerm {
+			rf.logs = rf.logs[args.lastIncludedIndex + 1 - rf.startIndex:]
+		} else {
+			rf.logs = nil
+		}
+	}
+
+	rf.snapshot = args.snapshot
+	rf.lastIncludedIndex = args.lastIncludedIndex
+	rf.lastIncludedTerm = args.lastIncludedTerm
+	rf.applyCond.Signal()
+
+	return
+}
 
 func (rf *Raft) ticker() {
 	for rf.killed() == false {
