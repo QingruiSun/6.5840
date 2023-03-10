@@ -159,18 +159,24 @@ func (rf *Raft) readPersist(data []byte) {
         var term int
         var votedFor int
         var logs []Log
-        if d.Decode(&term) != nil || d.Decode(&votedFor) != nil || d.Decode(&logs) != nil {
+	var lastIncludedIndex int
+	var lastIncludedTerm int
+        if d.Decode(&term) != nil || d.Decode(&votedFor) != nil || d.Decode(&logs) != nil ||
+	d.Decode(&lastIncludedIndex) != nil || d.Decode(&lastIncludedTerm) != nil {
                 log.Printf("Error when Decode persist state\n")
         } else {
                 rf.currentTerm = term
                 rf.votedFor = votedFor
                 rf.logs = logs
-                rf.lastLogIndex = len(rf.logs) - 1
-		rf.lastLogTerm = -1
-                if rf.lastLogIndex >= 0 {
-                        rf.lastLogTerm = rf.logs[rf.lastLogIndex].Term
-                }
-		rf.logNumber = len(rf.logs)
+		rf.lastIncludedIndex = lastIncludedIndex
+		rf.lastIncludedTerm = lastIncludedTerm
+                rf.logNumber = rf.lastIncludedIndex + 1 + len(rf.logs)
+		rf.lastLogIndex = rf.logNumber - 1
+		rf.startIndex = rf.lastIncludedIndex + 1
+		rf.lastLogTerm = rf.lastIncludedTerm
+		if len(logs) > 0 {
+			rf.lastLogTerm = rf.logs[rf.logNumber - rf.startIndex]
+		}
         }
 }
 
@@ -186,11 +192,10 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	index-- // Our index start from 0
 	rf.snapshot = snapshot
 	rf.lastIncludedIndex = index
-	rf.lastIncludedTerm = -1
 	if rf.lastIncludedIndex >= 0 {
 		rf.lastIncludedTerm = rf.logs[rf.lastIncludedIndex - rf.startIndex].Term
 	}
-	rf.logs = rf.logs[rf.lastIncludedIndex + 1 - rf.startIndex]
+	rf.logs = rf.logs[rf.lastIncludedIndex + 1 - rf.startIndex :]
 
 }
 
@@ -210,7 +215,7 @@ func (rf *Raft) applyGoroutine() {
                 if rf.lastApplied < rf.commitIndex{
                         var apply_msgs []ApplyMsg
                         for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
-                                apply_msg := ApplyMsg{true, rf.logs[i].Command, i + 1, false, nil, 0, 0}
+                                apply_msg := ApplyMsg{true, rf.logs[i - rf.startIndex].Command, i + 1, false, nil, 0, 0}
                                 rf.lastApplied++
                                 apply_msgs = append(apply_msgs, apply_msg)
                         }
@@ -267,7 +272,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
         }
 
 	if (rf.votedFor == -1) || (rf.votedFor == args.CandidateId) {
-                if len(rf.logs) + rf.startIndex == 0 {
+                if rf.logNumber == 0 {
                         granted = true
                 } else if rf.lastLogTerm < args.LastLogTerm {
                         granted = true
@@ -356,14 +361,10 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
         log := Log{rf.currentTerm, command}
         rf.logs = append(rf.logs, log)
-        rf.lastLogIndex = len(rf.logs) - 1
+        rf.logNumber++
+	rf.lastLogIndex = rf.logNumber - 1
         rf.matchMaps[rf.lastLogIndex] = 1
-        if rf.lastLogIndex < 0 {
-                rf.lastLogTerm = -1
-        } else {
-                rf.lastLogTerm = rf.logs[rf.lastLogIndex].Term
-        }
-	rf.logNumber = rf.logNumber + 1
+        rf.lastLogTerm = rf.currentTerm
 
 	Debug(dStart, "Term %d, server %d start %v in index %d\n", rf.currentTerm, rf.me, command, rf.lastLogIndex)
         index = rf.lastLogIndex
@@ -429,11 +430,11 @@ func (rf *Raft) AppendEntriesHandler(args *AppendEntriesArgs, reply *AppendEntri
                 rf.election_start_time = rf.rest_start_time.Add(reelection_time)
         }
 
-        if (len(rf.logs) <= args.PrevLogIndex) || (args.PrevLogIndex >= 0 && rf.logs[args.PrevLogIndex].Term != args.PrevLogTerm) {
+        if (rf.logNumber <= args.PrevLogIndex) || (args.PrevLogIndex > rf.lastIncludedIndex) || (rf.PrevLogIndex == rf.lastIncludedIndex && args.PrevLogTerm != rf.lastIncludedTerm) || (rf.logs[args.PrevLogIndex - rf.startIndex].Term != args.PrevLogTerm) {
                 reply.Term = rf.currentTerm
                 reply.Success = false
 		Debug(dAppend, "Term %d, server %d refuse append entries from leader %d because unmatch log and term\n", rf.currentTerm, rf.me, args.LeaderId)
-                if len(rf.logs) <= args.PrevLogIndex {
+                if rf.logNumber <= args.PrevLogIndex {
 			Debug(dAppend, "Term %d, server %d logs len %d is too small for prev log index %d\n", rf.currentTerm, rf.me, len(rf.logs), args.PrevLogIndex)
 		} else {
 			Debug(dAppend, "Term %d, server %d recieve prev log index is %d, prev log term %d, according log term is %d\n", rf.currentTerm, rf.me, args.PrevLogIndex, args.PrevLogTerm, rf.logs[args.PrevLogIndex].Term)
@@ -444,8 +445,8 @@ func (rf *Raft) AppendEntriesHandler(args *AppendEntriesArgs, reply *AppendEntri
         unmatch_index := -1
         log_index := args.PrevLogIndex + 1
         entry_index := 0
-        for ; (log_index < len(rf.logs)) && (entry_index < len(args.Entries)); log_index, entry_index = log_index + 1, entry_index + 1 {
-                if rf.logs[log_index].Term != args.Entries[entry_index].Term {
+        for ; (log_index < rf.logNumber) && (entry_index < len(args.Entries)); log_index, entry_index = log_index + 1, entry_index + 1 {
+                if rf.logs[log_index - rf.startIndex].Term != args.Entries[entry_index].Term {
                         unmatch_index = entry_index
                         break
                 }
@@ -453,7 +454,7 @@ func (rf *Raft) AppendEntriesHandler(args *AppendEntriesArgs, reply *AppendEntri
 
 	Debug(dAppend, "Term %d, server %d unmatch index %d", rf.currentTerm, rf.me, unmatch_index)
         if unmatch_index != -1 {
-                rf.logs = append(rf.logs[:args.PrevLogIndex + 1 + unmatch_index], args.Entries[unmatch_index:]...)
+                rf.logs = append(rf.logs[:args.PrevLogIndex + 1 + unmatch_index - rf.startIndex], args.Entries[unmatch_index:]...)
         } else {
                 if entry_index < len(args.Entries) {
                         rf.logs = append(rf.logs, args.Entries[entry_index:]...)
@@ -461,10 +462,10 @@ func (rf *Raft) AppendEntriesHandler(args *AppendEntriesArgs, reply *AppendEntri
         }
 	rf.persist()
 
-	rf.logNumber = len(rf.logs)
-        if rf.logNumber > 0 {
+	rf.logNumber = len(rf.logs) + rf.startIndex
+        if len(rf.logs) > 0 {
                 rf.lastLogIndex = rf.logNumber - 1
-                rf.lastLogTerm = rf.logs[rf.lastLogIndex].Term
+                rf.lastLogTerm = rf.logs[rf.lastLogIndex - rf.startIndex].Term
         }
 
         if args.LeaderCommit > rf.commitIndex {
