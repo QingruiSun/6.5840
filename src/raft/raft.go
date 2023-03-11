@@ -450,7 +450,7 @@ func (rf *Raft) AppendEntriesHandler(args *AppendEntriesArgs, reply *AppendEntri
                 if rf.logNumber <= args.PrevLogIndex {
 			Debug(dAppend, "Term %d, server %d log number %d is too small for prev log index %d\n", rf.currentTerm, rf.me, rf.logNumber, args.PrevLogIndex)
 		} else {
-			Debug(dAppend, "Term %d, server %d recieve prev log index is %d, prev log term %d, according log term is %d\n", rf.currentTerm, rf.me, args.PrevLogIndex, args.PrevLogTerm, rf.logs[args.PrevLogIndex].Term)
+			Debug(dAppend, "Term %d, server %d recieve prev log index is %d, prev log term %d\n", rf.currentTerm, rf.me, args.PrevLogIndex, args.PrevLogTerm)
 		}
 		return
         }
