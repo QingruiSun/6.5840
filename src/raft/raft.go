@@ -172,13 +172,14 @@ func (rf *Raft) readPersist(data []byte) {
                 rf.votedFor = votedFor
                 rf.logs = logs
 		rf.lastIncludedIndex = lastIncludedIndex
+		Debug(dLog, "Term %d, server %d, lastIncludedIndex %d\n", rf.currentTerm, rf.me, rf.lastIncludedIndex)
 		rf.lastIncludedTerm = lastIncludedTerm
                 rf.logNumber = rf.lastIncludedIndex + 1 + len(rf.logs)
 		rf.lastLogIndex = rf.logNumber - 1
 		rf.startIndex = rf.lastIncludedIndex + 1
 		rf.lastLogTerm = rf.lastIncludedTerm
 		if len(logs) > 0 {
-			rf.lastLogTerm = rf.logs[rf.logNumber - rf.startIndex].Term
+			rf.lastLogTerm = rf.logs[rf.lastLogIndex - rf.startIndex].Term
 		}
 		rf.snapshot = rf.persister.ReadSnapshot()
         }
@@ -195,11 +196,14 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	defer rf.mu.Unlock()
 	index-- // Our index start from 0
 	rf.snapshot = snapshot
+	Debug(dSnapshot, "Term %d, server %d snapshot %v\n", rf.currentTerm, rf.me, rf.snapshot)
 	rf.lastIncludedIndex = index
 	if rf.lastIncludedIndex >= 0 {
 		rf.lastIncludedTerm = rf.logs[rf.lastIncludedIndex - rf.startIndex].Term
 	}
 	rf.logs = rf.logs[rf.lastIncludedIndex + 1 - rf.startIndex :]
+	rf.startIndex = rf.lastIncludedIndex + 1
+	rf.persist()
 
 }
 
@@ -211,6 +215,7 @@ func (rf *Raft) applyGoroutine() {
                 rf.applyCond.L.Lock()
                 rf.applyCond.Wait()
 		if rf.lastApplied < rf.lastIncludedIndex {
+			Debug(dSnapshot, "Term %d, server %d write snapshot\n", rf.currentTerm, rf.me)
 			msg := ApplyMsg{false, nil, -1, true, rf.snapshot, rf.lastIncludedTerm, rf.lastIncludedIndex + 1}
 			rf.applyCond.L.Unlock()
 			rf.applyChan <- msg
@@ -226,7 +231,7 @@ func (rf *Raft) applyGoroutine() {
                         }
                         rf.applyCond.L.Unlock()
                         for _, msg := range apply_msgs {
-				Debug(dApply, "Term %d, server %d apply %v in index %d\n", rf.currentTerm, rf.me, msg.Command, msg.CommandIndex)
+				Debug(dApply, "Term %d, server %d apply %v in index %d\n", rf.currentTerm, rf.me, msg.Command, msg.CommandIndex - 1)
                                 rf.applyChan <- msg
                         }
                 } else {
@@ -435,12 +440,13 @@ func (rf *Raft) AppendEntriesHandler(args *AppendEntriesArgs, reply *AppendEntri
                 rf.election_start_time = rf.rest_start_time.Add(reelection_time)
         }
 
-        if (rf.logNumber <= args.PrevLogIndex) || (args.PrevLogIndex > rf.lastIncludedIndex) || (args.PrevLogIndex == rf.lastIncludedIndex && args.PrevLogTerm != rf.lastIncludedTerm) || (rf.logs[args.PrevLogIndex - rf.startIndex].Term != args.PrevLogTerm) {
+	Debug(dAppend, "Term %d, server %d recieve args prevLogIndex %d, rf lastIncludedIndex %d, len logs %d\n", rf.currentTerm, rf.me, args.PrevLogIndex, rf.lastIncludedIndex, len(rf.logs))
+        if (rf.logNumber <= args.PrevLogIndex) || (args.PrevLogIndex < rf.lastIncludedIndex) || (args.PrevLogIndex == rf.lastIncludedIndex && args.PrevLogTerm != rf.lastIncludedTerm) || ((args.PrevLogIndex > rf.lastIncludedIndex) && (rf.logs[args.PrevLogIndex - rf.startIndex].Term != args.PrevLogTerm)) {
                 reply.Term = rf.currentTerm
                 reply.Success = false
 		Debug(dAppend, "Term %d, server %d refuse append entries from leader %d because unmatch log and term\n", rf.currentTerm, rf.me, args.LeaderId)
                 if rf.logNumber <= args.PrevLogIndex {
-			Debug(dAppend, "Term %d, server %d logs len %d is too small for prev log index %d\n", rf.currentTerm, rf.me, len(rf.logs), args.PrevLogIndex)
+			Debug(dAppend, "Term %d, server %d log number %d is too small for prev log index %d\n", rf.currentTerm, rf.me, rf.logNumber, args.PrevLogIndex)
 		} else {
 			Debug(dAppend, "Term %d, server %d recieve prev log index is %d, prev log term %d, according log term is %d\n", rf.currentTerm, rf.me, args.PrevLogIndex, args.PrevLogTerm, rf.logs[args.PrevLogIndex].Term)
 		}
@@ -520,7 +526,11 @@ func (rf *Raft) InstallSnapshotHandler(args *InstallSnapshotArgs, reply *Install
 
         reply.Term = rf.currentTerm
 
-        if args.LastIncludedIndex >= rf.startIndex + len(rf.logs) {
+	Debug(dAppend, "Term %d, server %d recieve install snapshot args lastIncludedIndex %d, args lastIncludedTerm %d\n", rf.currentTerm, rf.me, args.LastIncludedIndex, args.LastIncludedTerm)
+	if args.LastIncludedIndex < rf.startIndex {
+		return
+	}
+	if args.LastIncludedIndex >= rf.logNumber {
                 rf.logs = nil
         } else {
                 if rf.logs[args.LastIncludedIndex - rf.startIndex].Term == args.LastIncludedTerm {
@@ -533,6 +543,9 @@ func (rf *Raft) InstallSnapshotHandler(args *InstallSnapshotArgs, reply *Install
         rf.snapshot = args.Data
         rf.lastIncludedIndex = args.LastIncludedIndex
         rf.lastIncludedTerm = args.LastIncludedTerm
+	rf.startIndex = args.LastIncludedIndex + 1
+	rf.logNumber = args.LastIncludedIndex + 1 + len(rf.logs)
+	rf.persist()
         rf.applyCond.Signal()
 
         return
@@ -546,6 +559,7 @@ func (rf *Raft) sendInstallSnapshotRPC(server int) {
 	ok := rf.peers[server].Call("Raft.InstallSnapshotHandler", &args, &reply)
 	rf.mu.Lock()
 	if ok {
+		Debug(dSnapshot, "Term %d, leader %d recieve reply from server %d\n", rf.currentTerm, rf.me, server)
 		if reply.Term > rf.currentTerm {
 			rf.isLeader = false
 			rf.isCandidate = false
@@ -554,6 +568,9 @@ func (rf *Raft) sendInstallSnapshotRPC(server int) {
 			rf.persist()
 			rf.mu.Unlock()
 			return
+		} else {
+			rf.nextIndex[server] = rf.lastIncludedIndex + 1
+			Debug(dSnapshot, "Term %d, leader %d update server %d nextIndex to %d\n", rf.currentTerm, rf.me, server, rf.nextIndex[server])
 		}
 	}
 	rf.mu.Unlock()
@@ -570,6 +587,7 @@ func (rf *Raft) sendAppendEntriesForOneServer(server int) {
 	Debug(dAppend, "Term %d, leader %d, last log index %d, next index %d for server %d\n", rf.currentTerm, rf.me, rf.lastLogIndex, rf.nextIndex[server], server)
         if rf.nextIndex[server] <= rf.lastIncludedIndex {
 		go rf.sendInstallSnapshotRPC(server)
+		rf.mu.Unlock()
 		return
 	}
 	prev_log_index := rf.nextIndex[server] - 1
@@ -800,6 +818,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.logNumber = 0
         rf.applyChan = applyCh
         rf.applyCond = sync.NewCond(&rf.mu)
+	rf.lastIncludedIndex = -1
+	rf.lastIncludedTerm = -1
+	rf.startIndex = 0
         for i := 0; i < len(rf.peers); i++ {
                 rf.nextIndex = append(rf.nextIndex, rf.lastLogIndex + 1)
                 rf.matchIndex = append(rf.matchIndex, -1)

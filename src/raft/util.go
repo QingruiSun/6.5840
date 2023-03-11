@@ -26,6 +26,7 @@ const (
 	dAppend  logTopic = "APPEND"
 	dStart   logTopic = "START"
 	dBoot    logTopic = "BOOT"
+	dSnapshot logTopic = "SNAPSHOT"
 )
 
 var debugStart time.Time
