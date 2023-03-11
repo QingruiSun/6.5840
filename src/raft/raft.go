@@ -102,6 +102,8 @@ type Raft struct {
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 
 	var term int
 	var isleader bool
@@ -651,8 +653,11 @@ func (rf *Raft) sendAppendEntriesForOneServer(server int) {
 func (rf *Raft) sendAppendGoroutine() {
 
         for {
+		rf.mu.Lock()
                 for !rf.isLeader {
+			rf.mu.Unlock()
                         time.Sleep(time.Duration(rf.check_interval) * time.Millisecond)
+			rf.mu.Lock()
                 }
 
                 for index, _ := range rf.peers {
@@ -662,6 +667,7 @@ func (rf *Raft) sendAppendGoroutine() {
                         go rf.sendAppendEntriesForOneServer(index)
                 }
 
+		rf.mu.Unlock()
                 time.Sleep(time.Duration(rf.heartbeat_time) * time.Millisecond)
         }
 
@@ -712,18 +718,20 @@ func (rf *Raft) election_poller() {
         rf.rest_start_time = time.Now()
         rf.election_start_time = rf.rest_start_time.Add(reelection_time)
         for {
+		rf.mu.Lock()
                 if rf.killed() {
+			rf.mu.Unlock()
                         return
                 }
                 if rf.isLeader {
+			rf.mu.Unlock()
                         time.Sleep(time.Duration(rf.check_interval) * time.Millisecond)
-                        continue
+			continue
                 }
 
                 if rf.isFollower {
                         now_time := time.Now()
                         if (now_time.After(rf.election_start_time)) {
-                                rf.mu.Lock()
                                 rf.isFollower = false
                                 rf.isCandidate = true
                                 rf.currentTerm = rf.currentTerm + 1
@@ -740,16 +748,16 @@ func (rf *Raft) election_poller() {
                                 reelection_time := time.Duration(rf.min_reelection_time) * time.Millisecond + time.Duration(rand.Int() % 300) * time.Millisecond
                                 rf.rest_start_time = time.Now()
                                 rf.election_start_time = rf.rest_start_time.Add(reelection_time)
-                                rf.mu.Unlock()
                         } else {
+				rf.mu.Unlock()
                                 time.Sleep(time.Duration(rf.check_interval) * time.Millisecond)
+				rf.mu.Lock()
                         }
                 }
 
 		if rf.isCandidate {
                         now_time := time.Now()
                         if (now_time.After(rf.election_start_time)) {
-                                rf.mu.Lock()
                                 rf.collect_vote = 1
                                 rf.currentTerm = rf.currentTerm + 1
 				rf.persist()
@@ -763,11 +771,13 @@ func (rf *Raft) election_poller() {
                                 reelection_time := time.Duration(rf.min_reelection_time) * time.Millisecond + time.Duration(rand.Int() % 300) * time.Millisecond
                                 rf.rest_start_time = time.Now()
                                 rf.election_start_time = rf.rest_start_time.Add(reelection_time)
-                                rf.mu.Unlock()
                         } else {
+				rf.mu.Unlock()
                                 time.Sleep(time.Duration(rf.check_interval) * time.Millisecond)
+				rf.mu.Lock()
                         }
                 }
+		rf.mu.Unlock()
         }
 }
 
