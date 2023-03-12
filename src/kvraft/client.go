@@ -4,6 +4,7 @@ import "6.5840/labrpc"
 import "crypto/rand"
 import "math/big"
 import "sync"
+import "6.5840/raft"
 
 
 type Clerk struct {
@@ -49,15 +50,22 @@ func (ck *Clerk) Get(key string) string {
 		args := GetArgs{key, ck.clientId, ck.sequence}
 		ck.sequence++
 		reply := GetReply{}
+		raft.Debug("CLERK", "Get leader %d, key %s, sequence %d\n", ck.leader, key, args.Sequence)
 		ok := ck.servers[ck.leader].Call("KVServer.Get", &args, &reply)
 		if !ok || reply.Err == ErrWrongLeader {
 			ck.leader = (ck.leader + 1) % len(ck.servers)
 			ck.sequence--
+			if !ok {
+				raft.Debug("CLERK", "No leader\n")
+			}
+			raft.Debug("CLERK", "Continue Get leader %d, key %s\n", ck.leader, key)
 			continue
 		}
 		if reply.Err ==  ErrNoKey {
+			raft.Debug("CLERK", "leader %d, No key %s\n", ck.leader, key)
 			return ""
 		}
+		raft.Debug("CLERK", "Succeed Get leader %d, key %s, value %s\n", ck.leader, key, reply.Value)
 		return reply.Value
 	}
 }
@@ -76,12 +84,18 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		args := PutAppendArgs{key, value, op, ck.clientId, ck.sequence}
 		ck.sequence++
 		reply := PutAppendReply{}
+		raft.Debug("CLERK", "PutAppend leader %d, key %s, value %s, op %s, sequence%d\n", ck.leader, key, value, op, args.Sequence)
 		ok := ck.servers[ck.leader].Call("KVServer.PutAppend", &args, &reply)
 		if !ok || reply.Err == ErrWrongLeader {
 			ck.leader = (ck.leader + 1) % len(ck.servers)
 			ck.sequence--
+			if ok {
+				raft.Debug("CLERK", "No leader\n")
+			}
+			raft.Debug("CLERK", "Continue PutAppend leader %d, key %s, value %s, op %s\n", ck.leader, key, value, op)
 			continue
 		}
+		raft.Debug("CLERK", "Succeed PutAppend leader %d, key %s, value %s, op %s\n", ck.leader, key, value, op)
 		break
 	}
 }

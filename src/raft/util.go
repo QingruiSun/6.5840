@@ -27,6 +27,8 @@ const (
 	dStart   logTopic = "START"
 	dBoot    logTopic = "BOOT"
 	dSnapshot logTopic = "SNAPSHOT"
+	dClerk      logTopic = "CLERK"
+	dServer  logTopic = "SERVER"
 )
 
 var debugStart time.Time
@@ -38,10 +40,10 @@ func init() {
 	log.SetFlags(log.Flags() &^ (log.Ldate | log.Ltime))
 }
 
-const debug = 0
+const debug = 1
 
 func Debug(topic logTopic, format string, a ...interface{}) {
-	if debug >= 1 {
+	if debug >= 1 && (topic == dClerk || topic == dServer) {
 		time := time.Since(debugStart).Microseconds()
 		time /= 100
 		prefix := fmt.Sprintf("%06d %v ", time, string(topic))

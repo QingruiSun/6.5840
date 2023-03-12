@@ -54,9 +54,9 @@ type KVServer struct {
 
 	// Your definitions here.
 	check_interval  int
-	commitMap  map[int]raft.ApplyMsg
 	keyValue   map[string]string
 	duplicateMap  map[int64]DuplicateReply
+	commitIndex int
 }
 
 func (kv *KVServer) ApplyCommit() {
@@ -64,6 +64,7 @@ func (kv *KVServer) ApplyCommit() {
 		kv.mu.Lock()
 		if m.CommandValid {
 			command := m.Command.(Op)
+			raft.Debug("SERVER", "recieve commit, commandindex %d, type %d, key %s, value %s\n", m.CommandIndex, command.Type, command.Key, command.Value)
 			if prev_reply, ok := kv.duplicateMap[command.Sequence]; !ok || prev_reply.sequence  != command.Sequence { // no duplicate request
 				duplicate_reply := DuplicateReply{command.Sequence, "", ""}
 				if command.Type == PUT {
@@ -86,6 +87,7 @@ func (kv *KVServer) ApplyCommit() {
 			} else { // duplicate request, so no action
 
 			}
+			kv.commitIndex = m.CommandIndex
 		}
 		kv.mu.Unlock()
 	}
@@ -119,24 +121,21 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		kv.mu.Unlock()
 		time.Sleep(time.Duration(kv.check_interval) * time.Millisecond)
 		kv.mu.Lock()
-		if msg, ok := kv.commitMap[start_index]; ok {
-			command := msg.Command.(Op)
-			if (command.ClientId == args.ClientId) && (command.Sequence == args.Sequence) {
-				value, key_exist := kv.keyValue[args.Key]
-				if key_exist {
-					reply.Value = value
-					reply.Err = OK
-				} else {
-					reply.Err = ErrNoKey
-				}
-				delete(kv.commitMap, start_index)
-				kv.mu.Unlock()
-				return
-			} else {
+		if kv.commitIndex >= start_index {
+			if current_term, current_is_leader := kv.rf.GetState(); !current_is_leader || (current_term != start_term) {
 				reply.Err = ErrWrongLeader
 				kv.mu.Unlock()
 				return
 			}
+			value, key_exist := kv.keyValue[args.Key]
+			if key_exist {
+				reply.Value = value
+				reply.Err = OK
+			} else {
+				reply.Err = ErrNoKey
+			}
+			kv.mu.Unlock()
+			return
 		}
 		if _, is_leader := kv.rf.GetState(); !is_leader {
 			reply.Err = ErrWrongLeader
@@ -161,6 +160,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
                 return
         }
 
+	raft.Debug("SERVER", "key %s, value %s, op %s\n", args.Key, args.Value, args.Op)
         op := Op{GET, args.Key, "", args.ClientId, args.Sequence}
         start_index, start_term, is_leader := kv.rf.Start(op)
         if !is_leader {
@@ -172,23 +172,20 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
                 kv.mu.Unlock()
                 time.Sleep(time.Duration(kv.check_interval) * time.Millisecond)
                 kv.mu.Lock()
-                if msg, ok := kv.commitMap[start_index]; ok {
-			command := msg.Command.(Op)
-                        if (command.ClientId == args.ClientId) && (command.Sequence == args.Sequence) {
-				if args.Op == "Put" {
-					kv.keyValue[args.Key] = args.Value
-				} else {
-					kv.keyValue[args.Key] = kv.keyValue[args.Key] + args.Value
-				}
-				reply.Err = OK
-				delete(kv.commitMap, start_index)
+                if kv.commitIndex >= start_index {
+			if current_term, current_is_leader := kv.rf.GetState(); !current_is_leader || (current_term != start_term) {
+				reply.Err = ErrWrongLeader
 				kv.mu.Unlock()
 				return
-                        } else {
-                                reply.Err = ErrWrongLeader
-                                kv.mu.Unlock()
-                                return
-                        }
+			}
+			if args.Op == "Put" {
+				kv.keyValue[args.Key] = args.Value
+			} else {
+				kv.keyValue[args.Key] = kv.keyValue[args.Key] + args.Value
+			}
+			reply.Err = OK
+			kv.mu.Unlock()
+			return
                 }
 		if _, is_leader := kv.rf.GetState(); !is_leader {
                         reply.Err = ErrWrongLeader
@@ -239,9 +236,10 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.maxraftstate = maxraftstate
 
 	// You may need initialization code here.
-	kv.commitMap = make(map[int]raft.ApplyMsg)
 	kv.keyValue = make(map[string]string)
+	kv.duplicateMap = make(map[int64]DuplicateReply)
 	kv.check_interval = 10
+	kv.commitIndex = 0
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
