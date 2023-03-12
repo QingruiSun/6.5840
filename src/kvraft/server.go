@@ -7,6 +7,7 @@ import (
 	"log"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 const Debug = false
@@ -18,11 +19,28 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 	return
 }
 
+const (
+	GET = 0
+	APPEND = 1
+	PUT = 2
+)
+
 
 type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+	Type   int
+	Key    string
+	Value  string
+	ClientId int64
+	Sequence int64
+}
+
+type DuplicateReply struct {
+	sequence int64
+	value string
+	err   Err
 }
 
 type KVServer struct {
@@ -35,15 +53,149 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
+	check_interval  int
+	commitMap  map[int]raft.ApplyMsg
+	keyValue   map[string]string
+	duplicateMap  map[int64]DuplicateReply
+}
+
+func (kv *KVServer) ApplyCommit() {
+	for m := range kv.applyCh {
+		kv.mu.Lock()
+		if m.CommandValid {
+			command := m.Command.(Op)
+			if prev_reply, ok := kv.duplicateMap[command.Sequence]; !ok || prev_reply.sequence  != command.Sequence { // no duplicate request
+				duplicate_reply := DuplicateReply{command.Sequence, "", ""}
+				if command.Type == PUT {
+					kv.keyValue[command.Key] = command.Value
+					duplicate_reply.err = OK
+				}
+				if command.Type == APPEND {
+					kv.keyValue[command.Key] = kv.keyValue[command.Key] + command.Value
+					duplicate_reply.err = OK
+				}
+				if command.Type == GET {
+					if value, ok := kv.keyValue[command.Key]; !ok {
+						duplicate_reply.err = ErrNoKey
+					} else {
+						duplicate_reply.err = OK
+						duplicate_reply.value = value
+					}
+				}
+				kv.duplicateMap[command.ClientId] = duplicate_reply // can overwrite old sequence of the same client id
+			} else { // duplicate request, so no action
+
+			}
+		}
+		kv.mu.Unlock()
+	}
 }
 
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
+	kv.mu.Lock()
+	if _, is_leader := kv.rf.GetState(); !is_leader {
+		reply.Err = ErrWrongLeader
+		kv.mu.Unlock()
+		return
+	}
+
+	if prev_reply, ok := kv.duplicateMap[args.ClientId]; ok && prev_reply.sequence == args.Sequence {
+		reply.Err = prev_reply.err
+		reply.Value = prev_reply.value
+		kv.mu.Unlock()
+		return
+	}
+
+	op := Op{GET, args.Key, "", args.ClientId, args.Sequence}
+	start_index, start_term, is_leader := kv.rf.Start(op)
+	if !is_leader {
+		reply.Err = ErrWrongLeader
+		kv.mu.Unlock()
+		return
+	}
+	for {
+		kv.mu.Unlock()
+		time.Sleep(time.Duration(kv.check_interval) * time.Millisecond)
+		kv.mu.Lock()
+		if msg, ok := kv.commitMap[start_index]; ok {
+			command := msg.Command.(Op)
+			if (command.ClientId == args.ClientId) && (command.Sequence == args.Sequence) {
+				value, key_exist := kv.keyValue[args.Key]
+				if key_exist {
+					reply.Value = value
+					reply.Err = OK
+				} else {
+					reply.Err = ErrNoKey
+				}
+				delete(kv.commitMap, start_index)
+				kv.mu.Unlock()
+				return
+			} else {
+				reply.Err = ErrWrongLeader
+				kv.mu.Unlock()
+				return
+			}
+		}
+		if _, is_leader := kv.rf.GetState(); !is_leader {
+			reply.Err = ErrWrongLeader
+			kv.mu.Unlock()
+			return
+		}
+	}
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
+	kv.mu.Lock()
+        if _, is_leader := kv.rf.GetState(); !is_leader {
+                reply.Err = ErrWrongLeader
+                kv.mu.Unlock()
+                return
+        }
+
+        if prev_reply, ok := kv.duplicateMap[args.ClientId]; ok && prev_reply.sequence == args.Sequence {
+                reply.Err = prev_reply.err
+                kv.mu.Unlock()
+                return
+        }
+
+        op := Op{GET, args.Key, "", args.ClientId, args.Sequence}
+        start_index, start_term, is_leader := kv.rf.Start(op)
+        if !is_leader {
+                reply.Err = ErrWrongLeader
+                kv.mu.Unlock()
+                return
+        }
+        for {
+                kv.mu.Unlock()
+                time.Sleep(time.Duration(kv.check_interval) * time.Millisecond)
+                kv.mu.Lock()
+                if msg, ok := kv.commitMap[start_index]; ok {
+			command := msg.Command.(Op)
+                        if (command.ClientId == args.ClientId) && (command.Sequence == args.Sequence) {
+				if args.Op == "Put" {
+					kv.keyValue[args.Key] = args.Value
+				} else {
+					kv.keyValue[args.Key] = kv.keyValue[args.Key] + args.Value
+				}
+				reply.Err = OK
+				delete(kv.commitMap, start_index)
+				kv.mu.Unlock()
+				return
+                        } else {
+                                reply.Err = ErrWrongLeader
+                                kv.mu.Unlock()
+                                return
+                        }
+                }
+		if _, is_leader := kv.rf.GetState(); !is_leader {
+                        reply.Err = ErrWrongLeader
+                        kv.mu.Unlock()
+                        return
+                }
+        }
 }
 
 // the tester calls Kill() when a KVServer instance won't
@@ -87,11 +239,15 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.maxraftstate = maxraftstate
 
 	// You may need initialization code here.
+	kv.commitMap = make(map[int]raft.ApplyMsg)
+	kv.keyValue = make(map[string]string)
+	kv.check_interval = 10
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	// You may need initialization code here.
+	go kv.ApplyCommit()
 
 	return kv
 }

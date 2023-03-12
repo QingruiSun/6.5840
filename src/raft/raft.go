@@ -212,6 +212,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 func (rf *Raft) applyGoroutine() {
         for {
                 if rf.killed() {
+			close(rf.applyChan)
                         return
                 }
                 rf.applyCond.L.Lock()
