@@ -7,7 +7,6 @@ import (
 	"log"
 	"sync"
 	"sync/atomic"
-	"time"
 )
 
 const Debug = false
@@ -57,6 +56,7 @@ type KVServer struct {
 	keyValue   map[string]string
 	duplicateMap  map[int64]DuplicateReply
 	commitIndex int
+	applyCond *sync.Cond
 }
 
 func (kv *KVServer) ApplyCommit() {
@@ -88,8 +88,11 @@ func (kv *KVServer) ApplyCommit() {
 
 			}
 			kv.commitIndex = m.CommandIndex
+			kv.mu.Unlock()
+			kv.applyCond.Broadcast()
+		} else {
+			kv.mu.Unlock()
 		}
-		kv.mu.Unlock()
 	}
 }
 
@@ -118,9 +121,6 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		return
 	}
 	for {
-		kv.mu.Unlock()
-		time.Sleep(time.Duration(kv.check_interval) * time.Millisecond)
-		kv.mu.Lock()
 		if kv.commitIndex >= start_index {
 			if current_term, current_is_leader := kv.rf.GetState(); !current_is_leader || (current_term != start_term) {
 				reply.Err = ErrWrongLeader
@@ -142,6 +142,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 			kv.mu.Unlock()
 			return
 		}
+		kv.applyCond.Wait()
 	}
 }
 
@@ -169,9 +170,6 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
                 return
         }
         for {
-                kv.mu.Unlock()
-                time.Sleep(time.Duration(kv.check_interval) * time.Millisecond)
-                kv.mu.Lock()
                 if kv.commitIndex >= start_index {
 			if current_term, current_is_leader := kv.rf.GetState(); !current_is_leader || (current_term != start_term) {
 				reply.Err = ErrWrongLeader
@@ -192,6 +190,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
                         kv.mu.Unlock()
                         return
                 }
+		kv.applyCond.Wait()
         }
 }
 
@@ -240,6 +239,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.duplicateMap = make(map[int64]DuplicateReply)
 	kv.check_interval = 10
 	kv.commitIndex = 0
+	kv.applyCond = sync.NewCond(&kv.mu)
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
