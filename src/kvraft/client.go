@@ -5,7 +5,7 @@ import "crypto/rand"
 import "math/big"
 import "sync"
 import "6.5840/raft"
-
+import "time"
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd
@@ -15,6 +15,10 @@ type Clerk struct {
 	clientId         int64
 	sequence         int64
 }
+
+const (
+	check_interval = 20 * time.Millisecond
+)
 
 func nrand() int64 {
 	max := big.NewInt(int64(1) << 62)
@@ -59,6 +63,7 @@ func (ck *Clerk) Get(key string) string {
 				raft.Debug("CLERK", "No leader\n")
 			}
 			raft.Debug("CLERK", "Continue Get leader %d, key %s\n", ck.leader, key)
+			time.Sleep(check_interval)
 			continue
 		}
 		if reply.Err ==  ErrNoKey {
@@ -93,6 +98,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 				raft.Debug("CLERK", "No leader\n")
 			}
 			raft.Debug("CLERK", "Continue PutAppend leader %d, key %s, value %s, op %s\n", ck.leader, key, value, op)
+			time.Sleep(check_interval)
 			continue
 		}
 		raft.Debug("CLERK", "Succeed PutAppend leader %d, key %s, value %s, op %s\n", ck.leader, key, value, op)

@@ -40,7 +40,7 @@ func init() {
 	log.SetFlags(log.Flags() &^ (log.Ldate | log.Ltime))
 }
 
-const debug = 0
+const debug = 1
 
 func Debug(topic logTopic, format string, a ...interface{}) {
 	if debug >= 1 && (topic == dClerk || topic == dServer) {

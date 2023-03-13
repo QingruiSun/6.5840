@@ -36,7 +36,7 @@ type Op struct {
 	Sequence int64
 }
 
-type DuplicateReply struct {
+type ApplyResult struct {
 	sequence int64
 	value string
 	err   Err
@@ -54,9 +54,9 @@ type KVServer struct {
 	// Your definitions here.
 	check_interval  int
 	keyValue   map[string]string
-	duplicateMap  map[int64]DuplicateReply
+	duplicateMap  map[int64]ApplyResult
 	commitIndex int
-	applyCond *sync.Cond
+	chans map[int]chan ApplyResult
 }
 
 func (kv *KVServer) ApplyCommit() {
@@ -64,32 +64,34 @@ func (kv *KVServer) ApplyCommit() {
 		kv.mu.Lock()
 		if m.CommandValid {
 			command := m.Command.(Op)
+			result := ApplyResult{command.Sequence, "", ""}
 			raft.Debug("SERVER", "recieve commit, commandindex %d, type %d, key %s, value %s\n", m.CommandIndex, command.Type, command.Key, command.Value)
 			if prev_reply, ok := kv.duplicateMap[command.Sequence]; !ok || prev_reply.sequence  != command.Sequence { // no duplicate request
-				duplicate_reply := DuplicateReply{command.Sequence, "", ""}
 				if command.Type == PUT {
 					kv.keyValue[command.Key] = command.Value
-					duplicate_reply.err = OK
+					result.err = OK
 				}
 				if command.Type == APPEND {
 					kv.keyValue[command.Key] = kv.keyValue[command.Key] + command.Value
-					duplicate_reply.err = OK
+					result.err = OK
 				}
 				if command.Type == GET {
 					if value, ok := kv.keyValue[command.Key]; !ok {
-						duplicate_reply.err = ErrNoKey
+						result.err = ErrNoKey
 					} else {
-						duplicate_reply.err = OK
-						duplicate_reply.value = value
+						result.err = OK
+						result.value = value
 					}
 				}
-				kv.duplicateMap[command.ClientId] = duplicate_reply // can overwrite old sequence of the same client id
+				kv.duplicateMap[command.ClientId] = result // can overwrite old sequence of the same client id
 			} else { // duplicate request, so no action
 
 			}
 			kv.commitIndex = m.CommandIndex
 			kv.mu.Unlock()
-			kv.applyCond.Broadcast()
+			if _, ok := kv.chans[m.CommandIndex]; ok {
+				kv.chans[m.CommandIndex] <- result
+			}
 		} else {
 			kv.mu.Unlock()
 		}
@@ -115,34 +117,26 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 
 	op := Op{GET, args.Key, "", args.ClientId, args.Sequence}
 	start_index, start_term, is_leader := kv.rf.Start(op)
+	kv.chans[start_index] = make(chan ApplyResult, 1)
 	if !is_leader {
 		reply.Err = ErrWrongLeader
 		kv.mu.Unlock()
 		return
 	}
 	for {
-		if kv.commitIndex >= start_index {
-			if current_term, current_is_leader := kv.rf.GetState(); !current_is_leader || (current_term != start_term) {
-				reply.Err = ErrWrongLeader
-				kv.mu.Unlock()
-				return
-			}
-			value, key_exist := kv.keyValue[args.Key]
-			if key_exist {
-				reply.Value = value
-				reply.Err = OK
-			} else {
-				reply.Err = ErrNoKey
-			}
-			kv.mu.Unlock()
-			return
-		}
-		if _, is_leader := kv.rf.GetState(); !is_leader {
+		kv.mu.Unlock()
+		result := <-kv.chans[start_index]
+		raft.Debug("SERVER", "get chans recieve data\n")
+		kv.mu.Lock()
+		if current_term, current_is_leader := kv.rf.GetState(); !current_is_leader || (current_term != start_term) {
 			reply.Err = ErrWrongLeader
 			kv.mu.Unlock()
 			return
 		}
-		kv.applyCond.Wait()
+		reply.Value = result.value
+		reply.Err = result.err
+		kv.mu.Unlock()
+		return
 	}
 }
 
@@ -164,33 +158,25 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	raft.Debug("SERVER", "key %s, value %s, op %s\n", args.Key, args.Value, args.Op)
         op := Op{GET, args.Key, "", args.ClientId, args.Sequence}
         start_index, start_term, is_leader := kv.rf.Start(op)
+	kv.chans[start_index] = make(chan ApplyResult, 1)
         if !is_leader {
                 reply.Err = ErrWrongLeader
                 kv.mu.Unlock()
                 return
         }
         for {
-                if kv.commitIndex >= start_index {
-			if current_term, current_is_leader := kv.rf.GetState(); !current_is_leader || (current_term != start_term) {
-				reply.Err = ErrWrongLeader
-				kv.mu.Unlock()
-				return
-			}
-			if args.Op == "Put" {
-				kv.keyValue[args.Key] = args.Value
-			} else {
-				kv.keyValue[args.Key] = kv.keyValue[args.Key] + args.Value
-			}
-			reply.Err = OK
+		kv.mu.Unlock()
+		result := <-kv.chans[start_index]
+		raft.Debug("SERVER", "putappend chans recieve data\n")
+		kv.mu.Lock()
+		if current_term, current_is_leader := kv.rf.GetState(); !current_is_leader || (current_term != start_term) {
+			reply.Err = ErrWrongLeader
 			kv.mu.Unlock()
 			return
-                }
-		if _, is_leader := kv.rf.GetState(); !is_leader {
-                        reply.Err = ErrWrongLeader
-                        kv.mu.Unlock()
-                        return
-                }
-		kv.applyCond.Wait()
+		}
+		reply.Err = result.err
+		kv.mu.Unlock()
+		return
         }
 }
 
@@ -236,11 +222,10 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	// You may need initialization code here.
 	kv.keyValue = make(map[string]string)
-	kv.duplicateMap = make(map[int64]DuplicateReply)
 	kv.check_interval = 10
 	kv.commitIndex = 0
-	kv.applyCond = sync.NewCond(&kv.mu)
-
+	kv.chans = make(map[int]chan ApplyResult)
+	kv.duplicateMap = make(map[int64]ApplyResult)
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
