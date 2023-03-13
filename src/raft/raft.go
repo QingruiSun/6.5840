@@ -260,7 +260,7 @@ func (rf *Raft) replicator(server int) {
 func (rf *Raft) needReplicate(server int) bool {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	return rf.isLeader && rf.matchIndex[server] < rf.lastLogIndex
+	return rf.isLeader && rf.nextIndex[server] < rf.lastLogIndex
 }
 
 
