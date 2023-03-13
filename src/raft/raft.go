@@ -79,6 +79,7 @@ type Raft struct {
 	snapshot []byte
         matchMaps map[int]int
         applyCond *sync.Cond
+	replicatorCond []*sync.Cond
         applyChan chan ApplyMsg
         collect_vote int
         rest_start_time time.Time
@@ -243,6 +244,25 @@ func (rf *Raft) applyGoroutine() {
         }
 }
 
+func (rf *Raft) replicator(server int) {
+	rf.replicatorCond[server].L.Lock()
+	defer rf.replicatorCond[server].L.Unlock()
+	for rf.killed() == false {
+		Debug(dLog, "server %d for server %d sleep\n", rf.me, server)
+		if (rf.needReplicate(server)) {
+			rf.sendAppendEntriesForOneServer(server)
+		} else {
+			rf.replicatorCond[server].Wait()
+		}
+	}
+}
+
+func (rf *Raft) needReplicate(server int) bool {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	return rf.isLeader && rf.matchIndex[server] < rf.lastLogIndex
+}
+
 
 // example RequestVote RPC arguments structure.
 // field names must start with capital letters!
@@ -385,6 +405,11 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
         isLeader = true
 
 	rf.persist()
+	for i := 0; i < len(rf.peers); i++ {
+		if i != rf.me {
+			rf.replicatorCond[i].Signal()
+		}
+	}
         return index + 1, term, isLeader
 }
 
@@ -651,7 +676,7 @@ func (rf *Raft) sendAppendEntriesForOneServer(server int) {
         rf.mu.Unlock()
 }
 
-func (rf *Raft) sendAppendGoroutine() {
+func (rf *Raft) heartbeatGoroutine() {
 
         for {
 		rf.mu.Lock()
@@ -832,6 +857,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.lastIncludedIndex = -1
 	rf.lastIncludedTerm = -1
 	rf.startIndex = 0
+	rf.replicatorCond = make([]*sync.Cond, len(rf.peers))
         for i := 0; i < len(rf.peers); i++ {
                 rf.nextIndex = append(rf.nextIndex, rf.lastLogIndex + 1)
                 rf.matchIndex = append(rf.matchIndex, -1)
@@ -839,8 +865,14 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
         rf.readPersist(persister.ReadRaftState())
 	Debug(dBoot, "Term %d, server %d start boot with logs len %d\n", rf.currentTerm, rf.me, len(rf.logs))
-        go rf.election_poller()
-        go rf.sendAppendGoroutine()
+	for i := 0; i < len(rf.peers); i++ {
+		if i != rf.me {
+			rf.replicatorCond[i] = sync.NewCond(&sync.Mutex{})
+			go rf.replicator(i)
+		}
+	}
+	go rf.election_poller()
+        go rf.heartbeatGoroutine()
         go rf.applyGoroutine()
 
 	return rf
