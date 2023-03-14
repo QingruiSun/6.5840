@@ -660,10 +660,13 @@ func (rf *Raft) sendAppendEntriesForOneServer(server int) {
                                 if (rf.matchMaps[i] >= (len(rf.peers) / 2 + 1)) && (i > rf.commitIndex) {
 					if rf.logs[i - rf.startIndex].Term == rf.currentTerm {
 						rf.commitIndex = i
-                                                rf.applyCond.Signal()
 					}
                                 }
                         }
+			if rf.commitIndex > rf.lastApplied {
+				rf.applyCond.Signal()
+			}
+			Debug(dApply, "Term %d, leader %d update commit idx to %d\n", rf.currentTerm, rf.me, rf.commitIndex)
                         rf.mu.Unlock()
                         return
                 }

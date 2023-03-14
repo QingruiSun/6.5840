@@ -61,11 +61,13 @@ type KVServer struct {
 
 func (kv *KVServer) ApplyCommit() {
 	for m := range kv.applyCh {
+		raft.Debug("SERVER", "server %d want get lock apply a\n", kv.me)
+                command := m.Command.(Op)
+                result := ApplyResult{command.Sequence, "", ""}
+		raft.Debug("SERVER", "server %d recieve commit, commandindex %d, type %d, key %s, value %s\n", kv.me, m.CommandIndex, command.Type, command.Key, command.Value)
 		kv.mu.Lock()
+		raft.Debug("SERVER", "server %d succeed get lock apply b\n", kv.me)
 		if m.CommandValid {
-			command := m.Command.(Op)
-			result := ApplyResult{command.Sequence, "", ""}
-			raft.Debug("SERVER", "recieve commit, commandindex %d, type %d, key %s, value %s\n", m.CommandIndex, command.Type, command.Key, command.Value)
 			if prev_reply, ok := kv.duplicateMap[command.Sequence]; !ok || prev_reply.sequence  != command.Sequence { // no duplicate request
 				if command.Type == PUT {
 					kv.keyValue[command.Key] = command.Value
@@ -76,11 +78,14 @@ func (kv *KVServer) ApplyCommit() {
 					result.err = OK
 				}
 				if command.Type == GET {
+					raft.Debug("SERVER", "server %d recieve GET commit\n", kv.me)
 					if value, ok := kv.keyValue[command.Key]; !ok {
 						result.err = ErrNoKey
+						raft.Debug("SERVER", "server %d no key\n", kv.me)
 					} else {
 						result.err = OK
 						result.value = value
+						raft.Debug("SERVER", "server %d get key value %s\n", kv.me, value)
 					}
 				}
 				kv.duplicateMap[command.ClientId] = result // can overwrite old sequence of the same client id
@@ -90,8 +95,10 @@ func (kv *KVServer) ApplyCommit() {
 			kv.commitIndex = m.CommandIndex
 			kv.mu.Unlock()
 			if _, ok := kv.chans[m.CommandIndex]; ok {
+				raft.Debug("SERVER", "server %d recieve commit, commandindex %d, type %d, key %s, value %s, write to chans\n", kv.me, m.CommandIndex, command.Type, command.Key, command.Value)
 				kv.chans[m.CommandIndex] <- result
 			}
+			raft.Debug("SERVER", "server %d recieve commit, commandindex %d, type %d, key %s, value %s, finished\n", kv.me, m.CommandIndex, command.Type, command.Key, command.Value)
 		} else {
 			kv.mu.Unlock()
 		}
@@ -101,7 +108,9 @@ func (kv *KVServer) ApplyCommit() {
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
+	raft.Debug("SERVER", "server %d want get lock get a\n", kv.me)
 	kv.mu.Lock()
+	raft.Debug("SERVER", "server %d succeed get lock get a\n", kv.me)
 	if _, is_leader := kv.rf.GetState(); !is_leader {
 		reply.Err = ErrWrongLeader
 		kv.mu.Unlock()
@@ -117,6 +126,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 
 	op := Op{GET, args.Key, "", args.ClientId, args.Sequence}
 	start_index, start_term, is_leader := kv.rf.Start(op)
+	raft.Debug("SERVER", "server %d get %s in start index %d\n", kv.me, args.Key, start_index)
 	kv.chans[start_index] = make(chan ApplyResult, 1)
 	if !is_leader {
 		reply.Err = ErrWrongLeader
@@ -126,8 +136,10 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	for {
 		kv.mu.Unlock()
 		result := <-kv.chans[start_index]
-		raft.Debug("SERVER", "get chans recieve data\n")
+		raft.Debug("SERVER", "server %d get chans recieve data in  %d\n", kv.me, start_index)
+		raft.Debug("SERVER", "server %d want get lock get b\n", kv.me)
 		kv.mu.Lock()
+		raft.Debug("SERVER", "server %d succeed get lock get b\n", kv.me)
 		if current_term, current_is_leader := kv.rf.GetState(); !current_is_leader || (current_term != start_term) {
 			reply.Err = ErrWrongLeader
 			kv.mu.Unlock()
@@ -142,7 +154,10 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
+	raft.Debug("SERVER", "%d\n", kv.me)
+	raft.Debug("SERVER", "server %d want get lock put a\n", kv.me)
 	kv.mu.Lock()
+	raft.Debug("SERVER", "server %d succeed get lock put a\n", kv.me)
         if _, is_leader := kv.rf.GetState(); !is_leader {
                 reply.Err = ErrWrongLeader
                 kv.mu.Unlock()
@@ -155,8 +170,12 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
                 return
         }
 
-	raft.Debug("SERVER", "key %s, value %s, op %s\n", args.Key, args.Value, args.Op)
-        op := Op{GET, args.Key, "", args.ClientId, args.Sequence}
+	raft.Debug("SERVER", "server %d, key %s, value %s, op %s\n", kv.me, args.Key, args.Value, args.Op)
+	op_type := PUT
+	if args.Op == "Append" {
+		op_type = APPEND
+	}
+        op := Op{op_type, args.Key, args.Value, args.ClientId, args.Sequence}
         start_index, start_term, is_leader := kv.rf.Start(op)
 	kv.chans[start_index] = make(chan ApplyResult, 1)
         if !is_leader {
@@ -166,9 +185,12 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
         }
         for {
 		kv.mu.Unlock()
+		raft.Debug("SERVER", "server %d block on putappend chans before recieve data in %d\n", kv.me, start_index)
 		result := <-kv.chans[start_index]
-		raft.Debug("SERVER", "putappend chans recieve data\n")
+		raft.Debug("SERVER", "server %d putappend chans recieve data in %d\n", kv.me, start_index)
+		raft.Debug("SERVER", "server %d want get lock put b\n", kv.me)
 		kv.mu.Lock()
+		raft.Debug("SERVER", "server %d succeed get lock put b\n", kv.me)
 		if current_term, current_is_leader := kv.rf.GetState(); !current_is_leader || (current_term != start_term) {
 			reply.Err = ErrWrongLeader
 			kv.mu.Unlock()
