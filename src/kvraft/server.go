@@ -7,6 +7,7 @@ import (
 	"log"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 const Debug = false
@@ -24,6 +25,10 @@ const (
 	PUT = 2
 )
 
+// We introduce ExecutionTimeOut for this case, when leader start a log, then the leader lose
+// it's authority, so it can't commit it's log, it will block, and then block the client too(may be the bug of lab).
+// So we add a timer to let client resend command.
+const ExecutionTimeout = 500 * time.Millisecond
 
 type Op struct {
 	// Your definitions here.
@@ -135,8 +140,14 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	}
 	for {
 		kv.mu.Unlock()
-		result := <-kv.chans[start_index]
-		raft.Debug("SERVER", "server %d get chans recieve data in  %d\n", kv.me, start_index)
+		select {
+		case result := <-kv.chans[start_index]:
+			reply.Value = result.value
+			reply.Err = result.err
+			raft.Debug("SERVER", "server %d get chans recieve data in  %d\n", kv.me, start_index)
+		case <-time.After(ExecutionTimeout):
+			reply.Err = ErrTimeout
+		}
 		raft.Debug("SERVER", "server %d want get lock get b\n", kv.me)
 		kv.mu.Lock()
 		raft.Debug("SERVER", "server %d succeed get lock get b\n", kv.me)
@@ -145,8 +156,6 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 			kv.mu.Unlock()
 			return
 		}
-		reply.Value = result.value
-		reply.Err = result.err
 		kv.mu.Unlock()
 		return
 	}
@@ -186,8 +195,13 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
         for {
 		kv.mu.Unlock()
 		raft.Debug("SERVER", "server %d block on putappend chans before recieve data in %d\n", kv.me, start_index)
-		result := <-kv.chans[start_index]
-		raft.Debug("SERVER", "server %d putappend chans recieve data in %d\n", kv.me, start_index)
+		select {
+		case result := <-kv.chans[start_index]:
+			reply.Err = result.err
+			raft.Debug("SERVER", "server %d putappend chans recieve data in %d\n", kv.me, start_index)
+		case <-time.After(ExecutionTimeout):
+			reply.Err = ErrTimeout
+		}
 		raft.Debug("SERVER", "server %d want get lock put b\n", kv.me)
 		kv.mu.Lock()
 		raft.Debug("SERVER", "server %d succeed get lock put b\n", kv.me)
@@ -196,7 +210,6 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 			kv.mu.Unlock()
 			return
 		}
-		reply.Err = result.err
 		kv.mu.Unlock()
 		return
         }

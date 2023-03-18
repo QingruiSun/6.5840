@@ -56,7 +56,7 @@ func (ck *Clerk) Get(key string) string {
 		reply := GetReply{}
 		raft.Debug("CLERK", "client %d, Get server %d, key %s, sequence %d\n", ck.clientId, ck.leader, key, args.Sequence)
 		ok := ck.servers[ck.leader].Call("KVServer.Get", &args, &reply)
-		if !ok || reply.Err == ErrWrongLeader {
+		if !ok || reply.Err == ErrWrongLeader || reply.Err == ErrTimeout {
 			ck.leader = (ck.leader + 1) % len(ck.servers)
 			ck.sequence--
 			if !ok {
@@ -91,7 +91,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		reply := PutAppendReply{}
 		raft.Debug("CLERK", "client %d, PutAppend server %d, key %s, value %s, op %s, sequence%d\n", ck.clientId, ck.leader, key, value, op, args.Sequence)
 		ok := ck.servers[ck.leader].Call("KVServer.PutAppend", &args, &reply)
-		if !ok || reply.Err == ErrWrongLeader {
+		if !ok || reply.Err != OK {
 			ck.leader = (ck.leader + 1) % len(ck.servers)
 			ck.sequence--
 			if ok {
