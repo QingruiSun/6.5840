@@ -198,6 +198,9 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	index-- // Our index start from 0
+	if index < rf.startIndex {
+		return
+	}
 	rf.snapshot = snapshot
 	Debug(dSnapshot, "Term %d, server %d snapshot %v\n", rf.currentTerm, rf.me, rf.snapshot)
 	rf.lastIncludedIndex = index
