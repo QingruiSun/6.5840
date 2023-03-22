@@ -473,12 +473,12 @@ func (rf *Raft) AppendEntriesHandler(args *AppendEntriesArgs, reply *AppendEntri
         }
 
 	Debug(dAppend, "Term %d, server %d recieve args prevLogIndex %d, rf lastIncludedIndex %d, len logs %d\n", rf.currentTerm, rf.me, args.PrevLogIndex, rf.lastIncludedIndex, len(rf.logs))
-        if (rf.logNumber <= args.PrevLogIndex) || (args.PrevLogIndex < rf.lastIncludedIndex) || (args.PrevLogIndex == rf.lastIncludedIndex && args.PrevLogTerm != rf.lastIncludedTerm) || ((args.PrevLogIndex > rf.lastIncludedIndex) && (rf.logs[args.PrevLogIndex - rf.startIndex].Term != args.PrevLogTerm)) {
+        if (rf.logNumber <= args.PrevLogIndex) || (args.PrevLogIndex == rf.lastIncludedIndex && args.PrevLogTerm != rf.lastIncludedTerm) || ((args.PrevLogIndex > rf.lastIncludedIndex) && (rf.logs[args.PrevLogIndex - rf.startIndex].Term != args.PrevLogTerm)) {
                 reply.Term = rf.currentTerm
                 reply.Success = false
 		if args.PrevLogIndex >= rf.logNumber {
 			reply.NextIndex = rf.logNumber
-		} else if args.PrevLogIndex <= rf.lastIncludedIndex {
+		} else if args.PrevLogIndex == rf.lastIncludedIndex {
 			reply.NextIndex = 0
 		} else {
 			lastTerm := rf.logs[args.PrevLogIndex - rf.startIndex].Term
@@ -505,6 +505,11 @@ func (rf *Raft) AppendEntriesHandler(args *AppendEntriesArgs, reply *AppendEntri
 		}
 		return
         }
+
+	if (args.PrevLogIndex < rf.lastIncludedIndex) {
+		reply.Success = true
+		return
+	}
 
         unmatch_index := -1
         log_index := args.PrevLogIndex + 1
