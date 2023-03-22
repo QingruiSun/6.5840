@@ -73,13 +73,14 @@ func (kv *KVServer) ApplyCommit() {
 		kv.mu.Lock()
 		raft.Debug("SERVER", "server %d succeed get lock apply b\n", kv.me)
 		if m.CommandValid {
-			if prev_reply, ok := kv.duplicateMap[command.Sequence]; !ok || prev_reply.sequence  != command.Sequence { // no duplicate request
+			if prev_reply, ok := kv.duplicateMap[command.ClientId]; !ok || prev_reply.sequence  != command.Sequence { // no duplicate request
 				if command.Type == PUT {
 					kv.keyValue[command.Key] = command.Value
 					result.err = OK
 				}
 				if command.Type == APPEND {
 					kv.keyValue[command.Key] = kv.keyValue[command.Key] + command.Value
+					raft.Debug("SERVER", "server %d update key %s value to %s\n", kv.me, command.Key, kv.keyValue[command.Key])
 					result.err = OK
 				}
 				if command.Type == GET {
@@ -95,7 +96,8 @@ func (kv *KVServer) ApplyCommit() {
 				}
 				kv.duplicateMap[command.ClientId] = result // can overwrite old sequence of the same client id
 			} else { // duplicate request, so no action
-
+				result.err = kv.duplicateMap[command.ClientId].err
+				result.value = kv.duplicateMap[command.ClientId].value
 			}
 			kv.commitIndex = m.CommandIndex
 			kv.mu.Unlock()
@@ -146,6 +148,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 			reply.Err = result.err
 			raft.Debug("SERVER", "server %d get chans recieve data in  %d\n", kv.me, start_index)
 		case <-time.After(ExecutionTimeout):
+			raft.Debug("SERVER", "server %d get chans recieve data time out in %d\n", kv.me, start_index)
 			reply.Err = ErrTimeout
 		}
 		raft.Debug("SERVER", "server %d want get lock get b\n", kv.me)
