@@ -224,7 +224,7 @@ func (rf *Raft) applyGoroutine() {
 		if rf.lastApplied < rf.lastIncludedIndex {
 			Debug(dSnapshot, "Term %d, server %d write snapshot\n", rf.currentTerm, rf.me)
 			msg := ApplyMsg{false, nil, -1, true, rf.snapshot, rf.lastIncludedTerm, rf.lastIncludedIndex + 1}
-			rf.lastApplied = rf.lastIncludeIndex
+			rf.lastApplied = rf.lastIncludedIndex
 			rf.applyCond.L.Unlock()
 			rf.applyChan <- msg
 			rf.applyCond.L.Lock()
@@ -476,12 +476,12 @@ func (rf *Raft) AppendEntriesHandler(args *AppendEntriesArgs, reply *AppendEntri
         if (rf.logNumber <= args.PrevLogIndex) || (args.PrevLogIndex < rf.lastIncludedIndex) || (args.PrevLogIndex == rf.lastIncludedIndex && args.PrevLogTerm != rf.lastIncludedTerm) || ((args.PrevLogIndex > rf.lastIncludedIndex) && (rf.logs[args.PrevLogIndex - rf.startIndex].Term != args.PrevLogTerm)) {
                 reply.Term = rf.currentTerm
                 reply.Success = false
-		if args.PrevLogIndex <= rf.logNumber {
+		if args.PrevLogIndex >= rf.logNumber {
 			reply.NextIndex = rf.logNumber
 		} else if args.PrevLogIndex <= rf.lastIncludedIndex {
 			reply.NextIndex = 0
 		} else {
-			lastTerm := rf.logs[args.PrevLogIndex - rf. startIndex].Term
+			lastTerm := rf.logs[args.PrevLogIndex - rf.startIndex].Term
 			index := args.PrevLogIndex - 1
 			for index > rf.lastIncludedIndex && rf.logs[index - rf.startIndex].Term == lastTerm {
 				index--
@@ -706,6 +706,10 @@ func (rf *Raft) heartbeatGoroutine() {
 
         for {
 		rf.mu.Lock()
+		if rf.killed() {
+			rf.mu.Unlock()
+			return
+		}
                 for !rf.isLeader {
 			rf.mu.Unlock()
                         time.Sleep(time.Duration(rf.check_interval) * time.Millisecond)
