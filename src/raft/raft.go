@@ -224,10 +224,10 @@ func (rf *Raft) applyGoroutine() {
 		if rf.lastApplied < rf.lastIncludedIndex {
 			Debug(dSnapshot, "Term %d, server %d write snapshot\n", rf.currentTerm, rf.me)
 			msg := ApplyMsg{false, nil, -1, true, rf.snapshot, rf.lastIncludedTerm, rf.lastIncludedIndex + 1}
+			rf.lastApplied = rf.lastIncludeIndex
 			rf.applyCond.L.Unlock()
 			rf.applyChan <- msg
 			rf.applyCond.L.Lock()
-			rf.lastApplied = rf.lastIncludedIndex
 		}
                 if rf.lastApplied < rf.commitIndex{
                         var apply_msgs []ApplyMsg
