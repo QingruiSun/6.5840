@@ -447,6 +447,7 @@ type AppendEntriesArgs struct {
 type AppendEntriesReply struct {
         Term int
         Success bool
+	NextIndex int
 }
 
 func (rf *Raft) AppendEntriesHandler(args *AppendEntriesArgs, reply *AppendEntriesReply) {
@@ -475,6 +476,27 @@ func (rf *Raft) AppendEntriesHandler(args *AppendEntriesArgs, reply *AppendEntri
         if (rf.logNumber <= args.PrevLogIndex) || (args.PrevLogIndex < rf.lastIncludedIndex) || (args.PrevLogIndex == rf.lastIncludedIndex && args.PrevLogTerm != rf.lastIncludedTerm) || ((args.PrevLogIndex > rf.lastIncludedIndex) && (rf.logs[args.PrevLogIndex - rf.startIndex].Term != args.PrevLogTerm)) {
                 reply.Term = rf.currentTerm
                 reply.Success = false
+		if args.PrevLogIndex <= rf.logNumber {
+			reply.NextIndex = rf.logNumber
+		} else if args.PrevLogIndex <= rf.lastIncludedIndex {
+			reply.NextIndex = 0
+		} else {
+			lastTerm := rf.logs[args.PrevLogIndex - rf. startIndex].Term
+			index := args.PrevLogIndex - 1
+			for index > rf.lastIncludedIndex && rf.logs[index - rf.startIndex].Term == lastTerm {
+				index--
+			}
+			if index > rf.lastIncludedIndex {
+				reply.NextIndex = index + 1
+			} else {
+				if lastTerm != rf.lastIncludedTerm {
+					reply.NextIndex = index + 1
+				} else {
+					reply.NextIndex = 0
+				}
+			}
+		}
+
 		Debug(dAppend, "Term %d, server %d refuse append entries from leader %d because unmatch log and term\n", rf.currentTerm, rf.me, args.LeaderId)
                 if rf.logNumber <= args.PrevLogIndex {
 			Debug(dAppend, "Term %d, server %d log number %d is too small for prev log index %d\n", rf.currentTerm, rf.me, rf.logNumber, args.PrevLogIndex)
@@ -673,11 +695,9 @@ func (rf *Raft) sendAppendEntriesForOneServer(server int) {
                         rf.mu.Unlock()
                         return
                 }
-
-		if rf.nextIndex[server] > 0 {
-                        rf.nextIndex[server] = rf.nextIndex[server] - 1
-			Debug(dAppend, "Term %d, leader %d update server %d next index to %d", rf.currentTerm, rf.me, server, rf.nextIndex[server])
-                }
+                // Acoording to reply quickly adjust next index.
+		rf.nextIndex[server] = reply.NextIndex
+		Debug(dAppend, "Term %d, leader %d update server %d next index to %d", rf.currentTerm, rf.me, server, rf.nextIndex[server])
         }
         rf.mu.Unlock()
 }
