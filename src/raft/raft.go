@@ -610,7 +610,6 @@ func (rf *Raft) InstallSnapshotHandler(args *InstallSnapshotArgs, reply *Install
 }
 
 func (rf *Raft) sendInstallSnapshotRPC(server int) {
-	rf.mu.Lock()
 	args := InstallSnapshotArgs{rf.currentTerm, rf.me, rf.lastIncludedIndex, rf.lastIncludedTerm, rf.snapshot}
 	reply := InstallSnapshotReply{}
 	rf.mu.Unlock()
@@ -644,8 +643,7 @@ func (rf *Raft) sendAppendEntriesForOneServer(server int) {
 
 	Debug(dAppend, "Term %d, leader %d, last log index %d, next index %d for server %d\n", rf.currentTerm, rf.me, rf.lastLogIndex, rf.nextIndex[server], server)
         if rf.nextIndex[server] <= rf.lastIncludedIndex {
-		go rf.sendInstallSnapshotRPC(server)
-		rf.mu.Unlock()
+		rf.sendInstallSnapshotRPC(server)
 		return
 	}
 	prev_log_index := rf.nextIndex[server] - 1
