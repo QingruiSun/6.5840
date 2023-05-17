@@ -100,10 +100,13 @@ func (kv *KVServer) ApplyCommit() {
 				result.value = kv.duplicateMap[command.ClientId].value
 			}
 			kv.commitIndex = m.CommandIndex
-			kv.mu.Unlock()
 			if _, ok := kv.chans[m.CommandIndex]; ok {
 				raft.Debug("SERVER", "server %d recieve commit, commandindex %d, type %d, key %s, value %s, write to chans\n", kv.me, m.CommandIndex, command.Type, command.Key, command.Value)
-				kv.chans[m.CommandIndex] <- result
+				ch := kv.chans[m.CommandIndex]
+				kv.mu.Unlock()
+				ch <- result
+			} else {
+				kv.mu.Unlock()
 			}
 			raft.Debug("SERVER", "server %d recieve commit, commandindex %d, type %d, key %s, value %s, finished\n", kv.me, m.CommandIndex, command.Type, command.Key, command.Value)
 		} else {
@@ -135,6 +138,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	start_index, start_term, is_leader := kv.rf.Start(op)
 	raft.Debug("SERVER", "server %d get %s in start index %d\n", kv.me, args.Key, start_index)
 	kv.chans[start_index] = make(chan ApplyResult, 1)
+	ch := kv.chans[start_index]
 	if !is_leader {
 		reply.Err = ErrWrongLeader
 		kv.mu.Unlock()
@@ -143,7 +147,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	for {
 		kv.mu.Unlock()
 		select {
-		case result := <-kv.chans[start_index]:
+		case result := <-ch:
 			reply.Value = result.value
 			reply.Err = result.err
 			raft.Debug("SERVER", "server %d get chans recieve data in  %d\n", kv.me, start_index)
@@ -190,6 +194,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
         op := Op{op_type, args.Key, args.Value, args.ClientId, args.Sequence}
         start_index, start_term, is_leader := kv.rf.Start(op)
 	kv.chans[start_index] = make(chan ApplyResult, 1)
+	ch := kv.chans[start_index]
         if !is_leader {
                 reply.Err = ErrWrongLeader
                 kv.mu.Unlock()
@@ -199,7 +204,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		kv.mu.Unlock()
 		raft.Debug("SERVER", "server %d block on putappend chans before recieve data in %d\n", kv.me, start_index)
 		select {
-		case result := <-kv.chans[start_index]:
+		case result := <-ch:
 			reply.Err = result.err
 			raft.Debug("SERVER", "server %d putappend chans recieve data in %d\n", kv.me, start_index)
 		case <-time.After(ExecutionTimeout):
