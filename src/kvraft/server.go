@@ -5,6 +5,7 @@ import (
 	"6.5840/labrpc"
 	"6.5840/raft"
 	"log"
+	"bytes"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -42,9 +43,15 @@ type Op struct {
 }
 
 type ApplyResult struct {
-	sequence int64
-	value string
-	err   Err
+	Sequence int64
+	Value string
+	Err  Err
+}
+
+// we need store necessary information in snapshot
+type Snapshot struct {
+	KeyValue map[string]string
+	DuplicateMap map[int64]ApplyResult
 }
 
 type KVServer struct {
@@ -62,44 +69,78 @@ type KVServer struct {
 	duplicateMap  map[int64]ApplyResult
 	commitIndex int
 	chans map[int]chan ApplyResult
+	persister *raft.Persister
+}
+
+func (kv *KVServer) doSnapshot() {
+	if kv.maxraftstate == -1 {
+		return
+	}
+	if kv.persister.RaftStateSize() <= kv.maxraftstate {
+		return
+	}
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	snapshot := Snapshot{kv.keyValue, kv.duplicateMap}
+	if err := e.Encode(snapshot); err != nil {
+		panic(err)
+	}
+	snapshotState := w.Bytes()
+	kv.rf.Snapshot(kv.commitIndex, snapshotState)
+}
+
+// restore previous persisted snapshot
+func (kv *KVServer) restoreSnapshot(data []byte) {
+	if data == nil || len(data) < 1 {
+		return
+	}
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var snapshot Snapshot
+	if err := d.Decode(&snapshot); err != nil {
+		panic(err)
+	}
+	kv.keyValue = snapshot.KeyValue
+	kv.duplicateMap = snapshot.DuplicateMap
 }
 
 func (kv *KVServer) ApplyCommit() {
 	for m := range kv.applyCh {
 		raft.Debug("SERVER", "server %d want get lock apply a\n", kv.me)
-                command := m.Command.(Op)
-                result := ApplyResult{command.Sequence, "", ""}
-		raft.Debug("SERVER", "server %d recieve commit, commandindex %d, type %d, key %s, value %s\n", kv.me, m.CommandIndex, command.Type, command.Key, command.Value)
 		kv.mu.Lock()
 		raft.Debug("SERVER", "server %d succeed get lock apply b\n", kv.me)
-		if m.CommandValid {
-			if prev_reply, ok := kv.duplicateMap[command.ClientId]; !ok || prev_reply.sequence  != command.Sequence { // no duplicate request
+		if m.CommandValid { // this apply message is a command, we should install it to kv map.
+			command := m.Command.(Op)
+                        result := ApplyResult{command.Sequence, "", ""}
+			raft.Debug("SERVER", "server %d recieve commit, commandindex %d, type %d, key %s, value %s\n", kv.me, m.CommandIndex, command.Type, command.Key, command.Value)
+			if prev_reply, ok := kv.duplicateMap[command.ClientId]; !ok || prev_reply.Sequence  != command.Sequence { // no duplicate request
 				if command.Type == PUT {
 					kv.keyValue[command.Key] = command.Value
-					result.err = OK
+					result.Err = OK
 				}
 				if command.Type == APPEND {
 					kv.keyValue[command.Key] = kv.keyValue[command.Key] + command.Value
 					raft.Debug("SERVER", "server %d update key %s value to %s\n", kv.me, command.Key, kv.keyValue[command.Key])
-					result.err = OK
+					result.Err = OK
 				}
 				if command.Type == GET {
 					raft.Debug("SERVER", "server %d recieve GET commit\n", kv.me)
 					if value, ok := kv.keyValue[command.Key]; !ok {
-						result.err = ErrNoKey
+						result.Err = ErrNoKey
 						raft.Debug("SERVER", "server %d no key\n", kv.me)
 					} else {
-						result.err = OK
-						result.value = value
+						result.Err = OK
+						result.Value = value
 						raft.Debug("SERVER", "server %d get key value %s\n", kv.me, value)
 					}
 				}
 				kv.duplicateMap[command.ClientId] = result // can overwrite old sequence of the same client id
 			} else { // duplicate request, so no action
-				result.err = kv.duplicateMap[command.ClientId].err
-				result.value = kv.duplicateMap[command.ClientId].value
+				result.Err = kv.duplicateMap[command.ClientId].Err
+				result.Value = kv.duplicateMap[command.ClientId].Value
 			}
 			kv.commitIndex = m.CommandIndex
+			kv.doSnapshot()
 			if _, ok := kv.chans[m.CommandIndex]; ok {
 				raft.Debug("SERVER", "server %d recieve commit, commandindex %d, type %d, key %s, value %s, write to chans\n", kv.me, m.CommandIndex, command.Type, command.Key, command.Value)
 				ch := kv.chans[m.CommandIndex]
@@ -109,8 +150,12 @@ func (kv *KVServer) ApplyCommit() {
 				kv.mu.Unlock()
 			}
 			raft.Debug("SERVER", "server %d recieve commit, commandindex %d, type %d, key %s, value %s, finished\n", kv.me, m.CommandIndex, command.Type, command.Key, command.Value)
-		} else {
+		} else if m.SnapshotValid{  // this apply message is a sanpshot, we should install it to kv snapshot.
+			kv.restoreSnapshot(m.Snapshot)
+			kv.commitIndex = m.SnapshotIndex
 			kv.mu.Unlock()
+		} else { // we can't recognize this message
+			panic("Invalid message")
 		}
 	}
 }
@@ -127,9 +172,9 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		return
 	}
 
-	if prev_reply, ok := kv.duplicateMap[args.ClientId]; ok && prev_reply.sequence == args.Sequence {
-		reply.Err = prev_reply.err
-		reply.Value = prev_reply.value
+	if prev_reply, ok := kv.duplicateMap[args.ClientId]; ok && prev_reply.Sequence == args.Sequence {
+		reply.Err = prev_reply.Err
+		reply.Value = prev_reply.Value
 		kv.mu.Unlock()
 		return
 	}
@@ -148,8 +193,8 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		kv.mu.Unlock()
 		select {
 		case result := <-ch:
-			reply.Value = result.value
-			reply.Err = result.err
+			reply.Value = result.Value
+			reply.Err = result.Err
 			raft.Debug("SERVER", "server %d get chans recieve data in  %d\n", kv.me, start_index)
 		case <-time.After(ExecutionTimeout):
 			raft.Debug("SERVER", "server %d get chans recieve data time out in %d\n", kv.me, start_index)
@@ -180,8 +225,8 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
                 return
         }
 
-        if prev_reply, ok := kv.duplicateMap[args.ClientId]; ok && prev_reply.sequence == args.Sequence {
-                reply.Err = prev_reply.err
+        if prev_reply, ok := kv.duplicateMap[args.ClientId]; ok && prev_reply.Sequence == args.Sequence {
+                reply.Err = prev_reply.Err
                 kv.mu.Unlock()
                 return
         }
@@ -205,7 +250,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		raft.Debug("SERVER", "server %d block on putappend chans before recieve data in %d\n", kv.me, start_index)
 		select {
 		case result := <-ch:
-			reply.Err = result.err
+			reply.Err = result.Err
 			raft.Debug("SERVER", "server %d putappend chans recieve data in %d\n", kv.me, start_index)
 		case <-time.After(ExecutionTimeout):
 			reply.Err = ErrTimeout
@@ -242,8 +287,6 @@ func (kv *KVServer) killed() bool {
 	return z == 1
 }
 
-// servers[] contains the ports of the set of
-// servers that will cooperate via Raft to
 // form the fault-tolerant key/value service.
 // me is the index of the current server in servers[].
 // the k/v server should store snapshots through the underlying Raft
@@ -271,6 +314,9 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.duplicateMap = make(map[int64]ApplyResult)
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
+	kv.restoreSnapshot(persister.ReadSnapshot())
+	kv.commitIndex = kv.rf.GetSnapshotLastIndex()
+	kv.persister = persister
 
 	// You may need initialization code here.
 	go kv.ApplyCommit()
