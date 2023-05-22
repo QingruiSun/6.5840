@@ -701,7 +701,7 @@ func (rf *Raft) sendAppendEntriesForOneServer(server int) {
                                 rf.matchMaps[i]++
 				Debug(dAppend, "Term %d, leader %d, server %d, index %d add to %d\n", rf.currentTerm, rf.me, server, i, rf.matchMaps[i])
                                 if (rf.matchMaps[i] >= (len(rf.peers) / 2 + 1)) && (i > rf.commitIndex) {
-					if rf.logs[i - rf.startIndex].Term == rf.currentTerm {
+					if i >= rf.startIndex && rf.logs[i - rf.startIndex].Term == rf.currentTerm {
 						rf.commitIndex = i
 					}
                                 }
@@ -859,6 +859,10 @@ func (rf *Raft) election_poller() {
                 }
 		rf.mu.Unlock()
         }
+}
+
+func (rf *Raft) GetSnapshotLastIndex() int {
+	return rf.lastIncludedIndex + 1
 }
 
 func (rf *Raft) ticker() {
